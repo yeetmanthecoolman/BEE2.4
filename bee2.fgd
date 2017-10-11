@@ -79,6 +79,8 @@
 	= bee2_template_conf:
 	"Defines configuration options for a template."
 	[
+	targetname(target_source) readonly : "Name" : "config" : "The config entity is named ''config''."
+	
 	template_id(string): "Template ID" : "" : "The ID given to this template. If set this will be loaded automatically."
 	
 	realign_faces(sidelist): "Realign Faces" : : "Rotate and realign these faces to world." +
@@ -99,6 +101,10 @@
 	"Set this to discard excess data."
 	discard_brushes(boolean): "Discard Brushes" : 0 : "Don't keep brushes, for templates used to position overlays only."
 	detail_auto_visgroup(boolean): "Group Detail Entities" : 0 : "If True, each func_detail entity will be put into a auto_xx visgroup. Otherwise, all func_detail will be ungrouped. World brushes stay ungrouped regardless."
+	
+	input EnableVisGroup(string): "Enable the given visgroup."
+	input DisableVisGroup(string): "Disable the given visgroup."
+	input SetInstVar(string): "Set the given instance variable to a value."
 	]
 	
 @PointClass
@@ -110,10 +116,16 @@
 	"Applies the color of a surface at a position to template faces. The arrow should point out of the surface."
 	[
 	template_id(string): "Template ID" : "" : "The unique ID this template has (in the combined file)."
+	
 	faces(sidelist): "Faces" : : "The faces this position is applied to."
 	priority(integer): "Priority" : 0 : "Set this higher to make it apply in preference to other pickers. This allows using fallback positions for surfaces."
 	grid_snap(boolean): "Snap To Grid" : 0 : "For items like fizzlers, snap to the closest grid position in side directions."
 	remove_brush(boolean): "Remove Brush" : 0 : "After grabbing the surface, remove the brush. Should only be done when you know the brush isn't shared with other faces."
+	
+	output OnWhite(void): "Fired if the surface is portalable."
+	output OnWhite(void): "Fired if the surface is non-portalable."
+	output OnSolid(void): "Fired if the surface exists."
+	output OnEmpty(void): "Fired if no surface was found."
 	]
 
 // --------
