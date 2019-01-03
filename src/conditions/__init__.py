@@ -261,41 +261,6 @@ class Condition:
             source,
         )
 
-    def setup(self) -> None:
-        """Some results need some pre-processing before they can be used.
-
-        """
-        for res in self.results[:]:
-            self.setup_result(self.results, res, self.source)
-
-        for res in self.else_results[:]:
-            self.setup_result(self.else_results, res, self.source)
-
-    @staticmethod
-    def setup_result(res_list: List[Property], result: Property, source: Optional[str]='') -> None:
-        """Helper method to perform result setup."""
-        func = RESULT_SETUP.get(result.name)
-        if func:
-            # noinspection PyBroadException
-            try:
-                result.value = func(VMF, result)
-            except:
-                # Print the source of the condition if if fails...
-                LOGGER.exception(
-                    'Error in {} setup:',
-                    source or 'condition',
-                )
-                if utils.DEV_MODE:
-                    # Crash so this is immediately noticable..
-                    utils.quit_app(1)
-                else:
-                    # In release, just skip this one - that way it's
-                    # still hopefully possible to run the game.
-                    result.value = None
-            if result.value is None:
-                # This result is invalid, remove it.
-                res_list.remove(result)
-
     @staticmethod
     def test_result(inst: Entity, res: Property) -> Union[bool, object]:
         """Execute the given result."""
@@ -1349,14 +1314,6 @@ def res_switch_setup(res: Property):
                     method = SWITCH_TYPE(prop.value.casefold())
                 except ValueError:
                     pass
-
-    for prop in cases:
-        for result in prop.value:
-            Condition.setup_result(
-                prop.value,
-                result,
-                'switch: {} -> {}'.format(flag, prop.real_name),
-            )
 
     if method is SWITCH_TYPE.LAST:
         cases[:] = cases[::-1]
