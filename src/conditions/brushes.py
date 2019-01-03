@@ -15,7 +15,8 @@ from conditions import (
 )
 from srctools import Property, NoKeyError, Vec, Output, Entity, Side, conv_bool
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Iterable
+
 
 COND_MOD_NAME = 'Brushes'
 
@@ -377,19 +378,70 @@ def res_add_brush(inst: Entity, res: Property):
         vbsp.VMF.add_brush(solids.solid)
 
 
-@make_result_setup('TemplateBrush')
-def res_import_template_setup(res: Property):
-    temp_id = res['id']
+@make_result('TemplateBrush')
+def res_import_template(res: Property):
+    """Import a template VMF file, retexturing it to match orientation.
+
+    It will be placed overlapping the given instance.
+    Options:
+    - ID: The ID of the template to be inserted. Add visgroups to
+    additionally
+            add after a colon, comma-seperated (temp_id:vis1,vis2)
+    - force: a space-seperated list of overrides. If 'white' or 'black' is
+             present, the colour of tiles will be overridden. If `invert` is
+            added, white/black tiles will be swapped. If a tile size
+            ('2x2', '4x4', 'wall', 'special') is included, all tiles will
+            be switched to that size (if not a floor/ceiling). If 'world' or
+            'detail' is present, the brush will be forced to that type.
+    - replace: A block of template material -> replacement textures.
+            This is case insensitive - any texture here will not be altered
+            otherwise. If the material starts with a '#', it is instead a
+            face ID.
+    - replaceBrush: The position of a brush to replace (0 0 0=the surface).
+            This brush will be removed, and overlays will be fixed to use
+            all faces with the same normal. Can alternately be a block:
+            - Pos: The position to replace.
+            - additionalIDs: Space-separated list of face IDs in the
+            template
+              to also fix for overlays. The surface should have close to a
+              vertical normal, to prevent rescaling the overlay.
+            - removeBrush: If true, the original brush will not be removed.
+            - transferOverlay: Allow disabling transferring overlays to this
+              template. The IDs will be removed instead. (This can be an
+              instvar).
+    - keys/localkeys: If set, a brush entity will instead be generated with
+            these values. This overrides force world/detail.
+            Specially-handled keys:
+            - "origin", offset automatically.
+            - "movedir" on func_movelinear - set a normal surrounded by <>,
+              this gets replaced with angles.
+    - colorVar: If this fixup var is set
+            to `white` or `black`, that colour will be forced.
+            If the value is `<editor>`, the colour will be chosen based on
+            the color of the surface for ItemButtonFloor, funnels or
+            entry/exit frames.
+    - invertVar: If this fixup value is true, tile colour will be
+            swapped to the opposite of the current force option. This
+            applies
+            after colorVar.
+    - visgroup: Sets how visgrouped parts are handled. If 'none' (default),
+            they are ignored. If 'choose', one is chosen. If a number, that
+            is the percentage chance for each visgroup to be added.
+    - visgroup_force_var: If set and True, visgroup is ignored and all
+    groups
+            are added.
+    """
+    orig_temp_id = res['id']
 
     force = res['force', ''].casefold().split()
     if 'white' in force:
-        force_colour = template_brush.MAT_TYPES.white
+        conf_force_colour = template_brush.MAT_TYPES.white
     elif 'black' in force:
-        force_colour = template_brush.MAT_TYPES.black
+        conf_force_colour = template_brush.MAT_TYPES.black
     elif 'invert' in force:
-        force_colour = 'INVERT'
+        conf_force_colour = 'INVERT'
     else:
-        force_colour = None
+        conf_force_colour = None
 
     if 'world' in force:
         force_type = template_brush.TEMP_TYPES.world
@@ -408,12 +460,12 @@ def res_import_template_setup(res: Property):
     invert_var = res['invertVar', '']
     color_var = res['colorVar', '']
 
-    replace_tex = defaultdict(list)
+    replace_tex = {}  # type: Dict[str, List[str]]
     for prop in res.find_key('replace', []):
-        replace_tex[prop.name].append(prop.value)
+        replace_tex.setdefault(prop.name, []).append(prop.value)
 
     rem_replace_brush = True
-    additional_ids = set()
+    additional_replace_ids = set()  # type: Set[int]
     transfer_overlays = '1'
     try:
         replace_brush = res.find_key('replaceBrush')
@@ -422,7 +474,7 @@ def res_import_template_setup(res: Property):
     else:
         if replace_brush.has_children():
             replace_brush_pos = replace_brush['Pos', '0 0 0']
-            additional_ids = set(map(
+            additional_replace_ids.update(map(
                 srctools.conv_int,
                 replace_brush['additionalIDs', ''].split(),
             ))
@@ -436,7 +488,7 @@ def res_import_template_setup(res: Property):
 
     key_values = res.find_key("Keys", [])
     if key_values:
-        keys = Property("", [
+        key_block = Property("", [
             key_values,
             res.find_key("LocalKeys", []),
         ])
@@ -448,7 +500,7 @@ def res_import_template_setup(res: Property):
         # entity.
         force_type = template_brush.TEMP_TYPES.detail
     else:
-        keys = None
+        key_block = None
     visgroup_mode = res['visgroup', 'none'].casefold()
     if visgroup_mode not in ('none', 'choose'):
         visgroup_mode = srctools.conv_float(visgroup_mode.rstrip('%'), 0.00)
@@ -457,15 +509,15 @@ def res_import_template_setup(res: Property):
 
     # Generate the function which picks which visgroups to add to the map.
     if visgroup_mode == 'none':
-        def visgroup_func(_):
+        def conf_visgroup_func(groups: 'Iterable[str]') -> 'Iterable[str]':
             """none = don't add any visgroups."""
             return ()
     elif visgroup_mode == 'choose':
-        def visgroup_func(groups):
+        def conf_visgroup_func(groups: 'Iterable[str]') -> 'Iterable[str]':
             """choose = add one random group."""
             return [random.choice(groups)]
     else:
-        def visgroup_func(groups):
+        def conf_visgroup_func(groups: 'Iterable[str]') -> 'Iterable[str]':
             """Number = percent chance for each to be added"""
             for group in groups:
                 val = random.uniform(0, 100)
@@ -475,212 +527,134 @@ def res_import_template_setup(res: Property):
     # If true, force visgroups to all be used.
     visgroup_force_var = res['forceVisVar', '']
 
-    return (
-        temp_id,
-        dict(replace_tex),
-        force_colour,
-        force_grid,
-        force_type,
-        replace_brush_pos,
-        rem_replace_brush,
-        transfer_overlays,
-        additional_ids,
-        invert_var,
-        color_var,
-        visgroup_func,
-        visgroup_force_var,
-        keys,
-    )
+    def func(inst: Entity) -> None:
+        if ':' in orig_temp_id:
+            # Split, resolve each part, then recombine.
+            temp_id, visgroup = orig_temp_id.split(':', 1)
+            temp_id = (
+                conditions.resolve_value(inst, temp_id) + ':' +
+                conditions.resolve_value(inst, visgroup)
+            )
+        else:
+            temp_id = conditions.resolve_value(inst, orig_temp_id)
 
+        if srctools.conv_bool(conditions.resolve_value(inst, visgroup_force_var)):
+            def visgroup_func(groups: 'Iterable[str]') -> 'Iterable[str]':
+                """Use all the groups."""
+                yield from groups
+        else:
+            visgroup_func = conf_visgroup_func
 
-@make_result('TemplateBrush')
-def res_import_template(inst: Entity, res: Property):
-    """Import a template VMF file, retexturing it to match orientation.
+        temp_name, visgroups = template_brush.parse_temp_name(temp_id)
+        try:
+            template = template_brush.get_template(temp_name)
+        except template_brush.InvalidTemplateName:
+            # If we did lookup, display both forms.
+            if temp_id != orig_temp_id:
+                LOGGER.warning(
+                    '{} -> "{}" is not a valid template!',
+                    orig_temp_id,
+                    temp_name
+                )
+            else:
+                LOGGER.warning(
+                    '"{}" is not a valid template!',
+                    temp_name
+                )
+            # We don't want an error, just quit.
+            return
 
-    It will be placed overlapping the given instance.  
-    Options:  
-    - ID: The ID of the template to be inserted. Add visgroups to additionally
-            add after a colon, comma-seperated (temp_id:vis1,vis2)
-    - force: a space-seperated list of overrides. If 'white' or 'black' is
-             present, the colour of tiles will be overridden. If `invert` is
-            added, white/black tiles will be swapped. If a tile size
-            ('2x2', '4x4', 'wall', 'special') is included, all tiles will
-            be switched to that size (if not a floor/ceiling). If 'world' or
-            'detail' is present, the brush will be forced to that type.
-    - replace: A block of template material -> replacement textures.
-            This is case insensitive - any texture here will not be altered
-            otherwise. If the material starts with a '#', it is instead a
-            face ID.
-    - replaceBrush: The position of a brush to replace (0 0 0=the surface).
-            This brush will be removed, and overlays will be fixed to use
-            all faces with the same normal. Can alternately be a block:
-            - Pos: The position to replace.
-            - additionalIDs: Space-separated list of face IDs in the template
-              to also fix for overlays. The surface should have close to a
-              vertical normal, to prevent rescaling the overlay.
-            - removeBrush: If true, the original brush will not be removed.
-            - transferOverlay: Allow disabling transferring overlays to this
-              template. The IDs will be removed instead. (This can be an instvar).
-    - keys/localkeys: If set, a brush entity will instead be generated with
-            these values. This overrides force world/detail.
-            Specially-handled keys:
-            - "origin", offset automatically.
-            - "movedir" on func_movelinear - set a normal surrounded by <>,
-              this gets replaced with angles.
-    - colorVar: If this fixup var is set
-            to `white` or `black`, that colour will be forced.
-            If the value is `<editor>`, the colour will be chosen based on
-            the color of the surface for ItemButtonFloor, funnels or
-            entry/exit frames.
-    - invertVar: If this fixup value is true, tile colour will be
-            swapped to the opposite of the current force option. This applies
-            after colorVar.
-    - visgroup: Sets how visgrouped parts are handled. If 'none' (default),
-            they are ignored. If 'choose', one is chosen. If a number, that
-            is the percentage chance for each visgroup to be added.
-    - visgroup_force_var: If set and True, visgroup is ignored and all groups
-            are added.
-    """
-    (
-        orig_temp_id,
-        replace_tex,
-        force_colour,
-        force_grid,
-        force_type,
-        replace_brush_pos,
-        rem_replace_brush,
-        transfer_overlays,
-        additional_replace_ids,
-        invert_var,
-        color_var,
-        visgroup_func,
-        visgroup_force_var,
-        key_block,
-    ) = res.value
+        force_colour = conf_force_colour
 
-    if ':' in orig_temp_id:
-        # Split, resolve each part, then recombine.
-        temp_id, visgroup = orig_temp_id.split(':', 1)
-        temp_id = (
-            conditions.resolve_value(inst, temp_id) + ':' +
-            conditions.resolve_value(inst, visgroup)
+        if color_var.casefold() == '<editor>':
+            # Check traits for the colour it should be.
+            traits = instance_traits.get(inst)
+            if 'white' in traits:
+                force_colour = template_brush.MAT_TYPES.white
+            elif 'black' in traits:
+                force_colour = template_brush.MAT_TYPES.black
+            else:
+                LOGGER.warning(
+                    '"{}": Instance "{}" '
+                    "isn't one with inherent color!",
+                    temp_id,
+                    inst['file'],
+                )
+        elif color_var:
+            color_val = conditions.resolve_value(inst, color_var).casefold()
+
+            if color_val == 'white':
+                force_colour = template_brush.MAT_TYPES.white
+            elif color_val == 'black':
+                force_colour = template_brush.MAT_TYPES.black
+        # else: no color var
+
+        if srctools.conv_bool(conditions.resolve_value(inst, invert_var)):
+            force_colour = template_brush.TEMP_COLOUR_INVERT[force_colour]
+        # else: False value, no invert.
+
+        origin = Vec.from_str(inst['origin'])
+        angles = Vec.from_str(inst['angles', '0 0 0'])
+        temp_data = template_brush.import_template(
+            template,
+            origin,
+            angles,
+            targetname=inst['targetname', ''],
+            force_type=force_type,
+            visgroup_choose=visgroup_func,
+            add_to_map=True,
+            additional_visgroups=visgroups,
         )
-    else:
-        temp_id = conditions.resolve_value(inst, orig_temp_id)
 
-    if srctools.conv_bool(conditions.resolve_value(inst, visgroup_force_var)):
-        def visgroup_func(group):
-            """Use all the groups."""
-            yield from group
+        if key_block is not None:
+            conditions.set_ent_keys(temp_data.detail, inst, key_block)
+            br_origin = Vec.from_str(key_block.find_key('keys')['origin'])
+            br_origin.localise(origin, angles)
+            temp_data.detail['origin'] = br_origin
 
-    temp_name, visgroups = template_brush.parse_temp_name(temp_id)
-    try:
-        template = template_brush.get_template(temp_name)
-    except template_brush.InvalidTemplateName:
-        # If we did lookup, display both forms.
-        if temp_id != orig_temp_id:
-            LOGGER.warning(
-                '{} -> "{}" is not a valid template!',
-                orig_temp_id,
-                temp_name
-            )
+            move_dir = temp_data.detail['movedir', '']
+            if move_dir.startswith('<') and move_dir.endswith('>'):
+                move_dir = Vec.from_str(move_dir).rotate(*angles)
+                temp_data.detail['movedir'] = move_dir.to_angle()
+
+            # Add it to the list of ignored brushes, so vbsp.change_brush() doesn't
+            # modify it.
+            vbsp.IGNORED_BRUSH_ENTS.add(temp_data.detail)
+
+        try:
+            # This is the original brush the template is replacing. We fix
+            # overlay face IDs, so this brush is replaced by the faces in the
+            # template pointing the same way.
+            if replace_brush_pos is None:
+                raise KeyError  # Not set, raise to jump out of the try block
+
+            pos = Vec(replace_brush_pos).rotate(angles.x, angles.y, angles.z)
+            pos += origin
+            brush_group = SOLIDS[pos.as_tuple()]
+        except KeyError:
+            # Not set or solid group doesn't exist, skip..
+            pass
         else:
-            LOGGER.warning(
-                '"{}" is not a valid template!',
-                temp_name
+            conditions.steal_from_brush(
+                temp_data,
+                brush_group,
+                rem_replace_brush,
+                map(int, additional_replace_ids | template.overlay_faces),
+                conv_bool(conditions.resolve_value(inst, transfer_overlays), True),
             )
-        # We don't want an error, just quit.
-        return
 
-    if color_var.casefold() == '<editor>':
-        # Check traits for the colour it should be.
-        traits = instance_traits.get(inst)
-        if 'white' in traits:
-            force_colour = template_brush.MAT_TYPES.white
-        elif 'black' in traits:
-            force_colour = template_brush.MAT_TYPES.black
-        else:
-            LOGGER.warning(
-                '"{}": Instance "{}" '
-                "isn't one with inherent color!",
-                temp_id,
-                inst['file'],
-            )
-    elif color_var:
-        color_val = conditions.resolve_value(inst, color_var).casefold()
-
-        if color_val == 'white':
-            force_colour = template_brush.MAT_TYPES.white
-        elif color_val == 'black':
-            force_colour = template_brush.MAT_TYPES.black
-    # else: no color var
-
-    if srctools.conv_bool(conditions.resolve_value(inst, invert_var)):
-        force_colour = template_brush.TEMP_COLOUR_INVERT[force_colour]
-    # else: False value, no invert.
-
-    origin = Vec.from_str(inst['origin'])
-    angles = Vec.from_str(inst['angles', '0 0 0'])
-    temp_data = template_brush.import_template(
-        template,
-        origin,
-        angles,
-        targetname=inst['targetname', ''],
-        force_type=force_type,
-        visgroup_choose=visgroup_func,
-        add_to_map=True,
-        additional_visgroups=visgroups,
-    )
-
-    if key_block is not None:
-        conditions.set_ent_keys(temp_data.detail, inst, key_block)
-        br_origin = Vec.from_str(key_block.find_key('keys')['origin'])
-        br_origin.localise(origin, angles)
-        temp_data.detail['origin'] = br_origin
-
-        move_dir = temp_data.detail['movedir', '']
-        if move_dir.startswith('<') and move_dir.endswith('>'):
-            move_dir = Vec.from_str(move_dir).rotate(*angles)
-            temp_data.detail['movedir'] = move_dir.to_angle()
-
-        # Add it to the list of ignored brushes, so vbsp.change_brush() doesn't
-        # modify it.
-        vbsp.IGNORED_BRUSH_ENTS.add(temp_data.detail)
-
-    try:
-        # This is the original brush the template is replacing. We fix overlay
-        # face IDs, so this brush is replaced by the faces in the template
-        # pointing
-        # the same way.
-        if replace_brush_pos is None:
-            raise KeyError  # Not set, raise to jump out of the try block
-
-        pos = Vec(replace_brush_pos).rotate(angles.x, angles.y, angles.z)
-        pos += origin
-        brush_group = SOLIDS[pos.as_tuple()]
-    except KeyError:
-        # Not set or solid group doesn't exist, skip..
-        pass
-    else:
-        LOGGER.info('IDS: {}', additional_replace_ids | template.overlay_faces)
-        conditions.steal_from_brush(
+        template_brush.retexture_template(
             temp_data,
-            brush_group,
-            rem_replace_brush,
-            map(int, additional_replace_ids | template.overlay_faces),
-            conv_bool(conditions.resolve_value(inst, transfer_overlays), True),
+            origin,
+            inst.fixup,
+            replace_tex,
+            force_colour,
+            force_grid,
+            # Don't allow clumping if using custom keyvalues -
+            # then it won't be edited.
+            no_clumping=key_block is not None,
         )
-
-    template_brush.retexture_template(
-        temp_data,
-        origin,
-        inst.fixup,
-        replace_tex,
-        force_colour,
-        force_grid,
-        # Don't allow clumping if using custom keyvalues - then it won't be edited.
-        no_clumping=key_block is not None,
-    )
+    return func
 
 
 @make_result('HollowBrush')
