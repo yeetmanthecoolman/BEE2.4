@@ -624,81 +624,87 @@ def set_flip_panel_keyvalues() -> None:
         flip_pan['noise2'] = flip_panel_stop
 
 
-@conditions.make_result_setup('FaithBullseye')
-def res_faith_bullseye_check(res: Property) -> None:
+@conditions.make_result('FaithBullseye')
+def res_faith_bullseye_check(res: Property):
     """Do a check to ensure there are actually textures availble."""
+    has_textures = False
     for col in ('white', 'black'):
         for orient in ('wall', 'floor', 'ceiling'):
             if settings['textures'][
-                    'special.bullseye_{}_{}'.format(col, orient)
-                                        ] != ['']:
-                return res.value
-    return None  # No textures!
+                'special.bullseye_{}_{}'.format(col, orient)
+            ] != ['']:
+                has_textures = True
+                break
 
+    if not has_textures:
+        # There are no bullseye textures, this does nothing.
+        def func(inst: Entity) -> None:
+            pass
+        return func
 
-@conditions.make_result('FaithBullseye')
-def res_faith_bullseye(inst: Entity, res: Property):
-    """Replace the bullseye instances with textures instead."""
+    def func(inst: Entity) -> None:
+        """Replace the bullseye instances with textures instead."""
 
-    pos = Vec(0, 0, -64).rotate_by_str(inst['angles'])
-    pos = (pos + Vec.from_str(inst['origin'])).as_tuple()
+        pos = Vec(0, 0, -64).rotate_by_str(inst['angles'])
+        pos = (pos + Vec.from_str(inst['origin'])).as_tuple()
 
-    norm = Vec(0, 0, -1).rotate_by_str(inst['angles'])
+        norm = Vec(0, 0, -1).rotate_by_str(inst['angles'])
 
-    face = None
-    color = None
+        face = None
+        color = None
 
-    # Look for a world brush
-    if pos in conditions.SOLIDS:
-        solid = conditions.SOLIDS[pos]
-        if solid.normal == norm:
-            face = solid.face
-            color = solid.color
-            if make_bullseye_face(face, color):
-                # Use an alternate instance, without the decal ent.
-                inst['file'] = res.value
+        # Look for a world brush
+        if pos in conditions.SOLIDS:
+            solid = conditions.SOLIDS[pos]
+            if solid.normal == norm:
+                face = solid.face
+                color = solid.color
+                if make_bullseye_face(face, color):
+                    # Use an alternate instance, without the decal ent.
+                    inst['file'] = res.value
 
-    # Look for angled panels
-    if face is None and pos in ANGLED_PAN_BRUSH:
-        face, br_name = ANGLED_PAN_BRUSH[pos]
-        if face.mat in consts.WhitePan:
-            color = 'white'
-        elif face.mat in consts.BlackPan:
-            color = 'black'
-        else:
-            # Should never happen - no angled panel should be textured
-            # yet. Act as if the panel wasn't there.
-            face = None
+        # Look for angled panels
+        if face is None and pos in ANGLED_PAN_BRUSH:
+            face, br_name = ANGLED_PAN_BRUSH[pos]
+            if face.mat in consts.WhitePan:
+                color = 'white'
+            elif face.mat in consts.BlackPan:
+                color = 'black'
+            else:
+                # Should never happen - no angled panel should be textured
+                # yet. Act as if the panel wasn't there.
+                face = None
 
-        if face is not None and make_bullseye_face(face, color):
-            # The instance won't be used -
-            # there's already a helper
-            inst['file'] = ''
-            # We want to find the info_target, and parent it to the panel.
-
-            # The target is located at the center of the brush, which
-            # we already calculated.
-
-            for targ in VMF.by_class['info_target']:
-                if Vec.from_str(targ['origin']) == pos:
-                    targ['parentname'] = br_name
-                    PANEL_FAITH_TARGETS[pos].append(targ)
-
-    # Look for flip panels
-    if face is None and pos in FLIP_PAN_BRUSH:
-        white_face, black_face = FLIP_PAN_BRUSH[pos]
-        flip_orient = get_face_orient(white_face)
-        if make_bullseye_face(white_face, 'white', flip_orient):
-            # Use the white panel orient for both sides since the
-            # black panel spawns facing backward.
-            if make_bullseye_face(black_face, 'black', flip_orient):
-                # Flip panels also have their own helper..
+            if face is not None and make_bullseye_face(face, color):
+                # The instance won't be used -
+                # there's already a helper
                 inst['file'] = ''
+                # We want to find the info_target, and parent it to the panel.
 
-    # There isn't a surface - blank the instance, it's in goo or similar
-    if face is None:
-        inst['file'] = ''
-        return
+                # The target is located at the center of the brush, which
+                # we already calculated.
+
+                for targ in VMF.by_class['info_target']:
+                    if Vec.from_str(targ['origin']) == pos:
+                        targ['parentname'] = br_name
+                        PANEL_FAITH_TARGETS[pos].append(targ)
+
+        # Look for flip panels
+        if face is None and pos in FLIP_PAN_BRUSH:
+            white_face, black_face = FLIP_PAN_BRUSH[pos]
+            flip_orient = get_face_orient(white_face)
+            if make_bullseye_face(white_face, 'white', flip_orient):
+                # Use the white panel orient for both sides since the
+                # black panel spawns facing backward.
+                if make_bullseye_face(black_face, 'black', flip_orient):
+                    # Flip panels also have their own helper..
+                    inst['file'] = ''
+
+        # There isn't a surface - blank the instance, it's in goo or similar
+        if face is None:
+            inst['file'] = ''
+            return
+    return func
 
 
 def make_bullseye_face(
