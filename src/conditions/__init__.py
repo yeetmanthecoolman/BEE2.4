@@ -1271,12 +1271,13 @@ def res_timed_relay(inst: Entity, res: Property):
         new_out.comma_sep = False
         relay.add_out(new_out)
 
+make_result_setup('condition')(Condition.parse)
+
 
 @make_result('condition')
 def res_sub_condition(base_inst: Entity, res: Property):
     """Check a different condition if the outer block is true."""
     res.value.test(base_inst)
-make_result_setup('condition')(Condition.parse)
 
 
 @make_result('nextInstance')
