@@ -572,7 +572,7 @@ def make_result(orig_name: str, *aliases: str):
 
 def make_result_setup(*names: str):
     """Legacy setup function for results. This is no longer used."""
-    warnings.warn('Use closure system instead.', DeprecationWarning)
+    warnings.warn('Use closure system instead.', DeprecationWarning, stacklevel=2)
 
     def x(func: Callable[..., Any]):
         for name in names:
@@ -1227,7 +1227,7 @@ def hollow_block(solid_group: solidGroup, remove_orig_face=False):
             for new_face in brush.sides:
                 # The SKIP brush is the surface, all the others are nodraw.
                 if new_face.mat.casefold() != 'tools/toolsskip':
-                     continue
+                    continue
 
                 # Overwrite all the properties, to make the new brush
                 # the same as the original.
@@ -1258,7 +1258,7 @@ def hollow_block(solid_group: solidGroup, remove_orig_face=False):
 
 @make_flag('debug')
 @make_result('debug')
-def debug_flag(inst: Entity, props: Property):
+def debug_flag(inst: Entity, props: Property) -> bool:
     """Displays text when executed, for debugging conditions.
 
     If the text ends with an '=', the instance will also be displayed.
@@ -1280,13 +1280,13 @@ def debug_flag(inst: Entity, props: Property):
 
 
 @make_result('dummy', 'nop', 'do_nothing')
-def dummy_result(inst: Entity, props: Property):
+def dummy_result() -> None:
     """Dummy result that doesn't do anything."""
     pass
 
 
 @meta_cond(priority=1000, only_once=False)
-def remove_blank_inst(inst: Entity):
+def remove_blank_inst(inst: Entity) -> None:
     """Remove instances with a blank file keyvalue.
 
     This allows conditions to strip the instances when requested.
