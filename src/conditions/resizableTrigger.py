@@ -169,7 +169,7 @@ def res_resizeable_trigger(vmf: VMF, res: Property):
         ]
 
         # Use 'keys' and 'localkeys' blocks to set all the other keyvalues.
-        conditions.set_ent_keys(trig_ent, inst, res)
+        conditions.set_ent_keys(trig_ent, inst1, res)
 
         if is_coop:
             trig_ent['spawnflags'] = '1'  # Clients
@@ -177,7 +177,7 @@ def res_resizeable_trigger(vmf: VMF, res: Property):
 
             out_ent = manager = vmf.create_ent(
                 classname='logic_coop_manager',
-                targetname=conditions.local_name(inst, 'man'),
+                targetname=conditions.local_name(inst1, 'man'),
                 origin=origin,
             )
 
