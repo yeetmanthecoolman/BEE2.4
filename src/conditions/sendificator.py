@@ -1,9 +1,11 @@
+"""Implement the Sendificator item."""
 from typing import Tuple, Dict
 
 import conditions
 import connections
 import srctools.logger
 from srctools import Property, Entity, VMF, Vec, Output
+
 
 COND_MOD_NAME = None
 
@@ -13,18 +15,18 @@ LOGGER = srctools.logger.get_logger(__name__, alias='cond.sendtor')
 SENDTOR_TARGETS = {}  # type: Dict[str, Tuple[Vec, Vec]]
 
 
-@conditions.make_result_setup('SendificatorLaser')
-def res_sendificator_laser_setup(res: Property):
-    return (
+@conditions.make_result('SendificatorLaser')
+def res_sendificator_laser(res: Property):
+    """Record the position of the target for Sendificator Lasers."""
+    conf = (
         res.vec('offset'),
-        res.vec('direction', 0, 0, 1)
+        res.vec('direction', 0, 0, 1),
     )
 
+    def func(inst: Entity):
+        SENDTOR_TARGETS[inst['targetname']] = conf
 
-@conditions.make_result('SendificatorLaser')
-def res_sendificator_laser(inst: Entity, res: Property):
-    """Record the position of the target for Sendificator Lasers."""
-    SENDTOR_TARGETS[inst['targetname']] = res.value
+    return func
 
 
 @conditions.make_result('Sendificator')
@@ -85,4 +87,3 @@ def res_sendificator(vmf: VMF, inst: Entity):
         relay['StartDisabled'] = not is_on
         las_item.enable_cmd += (Output('', relay_name, 'Enable'),)
         las_item.disable_cmd += (Output('', relay_name, 'Disable'),)
-        LOGGER.info('Relay: {}', relay)
