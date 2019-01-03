@@ -626,7 +626,7 @@ def set_flip_panel_keyvalues() -> None:
 
 @conditions.make_result('FaithBullseye')
 def res_faith_bullseye_check(res: Property):
-    """Do a check to ensure there are actually textures availble."""
+    """Replace the bullseye instances with textures instead."""
     has_textures = False
     for col in ('white', 'black'):
         for orient in ('wall', 'floor', 'ceiling'):
@@ -643,7 +643,6 @@ def res_faith_bullseye_check(res: Property):
         return func
 
     def func(inst: Entity) -> None:
-        """Replace the bullseye instances with textures instead."""
 
         pos = Vec(0, 0, -64).rotate_by_str(inst['angles'])
         pos = (pos + Vec.from_str(inst['origin'])).as_tuple()
