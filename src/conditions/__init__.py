@@ -291,15 +291,9 @@ class Condition:
                 break
         results = self.results if success else self.else_results
         for res in results[:]:
-            try:
-                should_del = self.test_result(inst, res)
-                if should_del is RES_EXHAUSTED:
-                    results.remove(res)
-            except (NextInstance, EndCondition):
-                raise
-            except:
-                LOGGER.error('Fail in result "{}":', res.name)
-                raise
+            should_del = self.test_result(inst, res)
+            if should_del is RES_EXHAUSTED:
+                results.remove(res)
 
 
 AnnCallT = TypeVar('AnnCallT')
@@ -401,11 +395,11 @@ def conv_setup_pair(
     Callable[[Entity], CallResultT]
 ]:
     """Convert the old explict setup function into a new closure."""
-    setup, ann_order = annotation_caller(
+    setup_wrap, ann_order = annotation_caller(
         setup,
         srctools.VMF, Property,
     )
-    result, ann_order = annotation_caller(
+    result_wrap, ann_order = annotation_caller(
         result,
         srctools.VMF, Entity, Property,
     )
@@ -414,14 +408,15 @@ def conv_setup_pair(
         """Replacement function which performs the legacy behaviour."""
         # The old system for setup functions - smuggle them in by
         # setting Property.value to an arbitrary object.
-        smuggle = Property(prop.real_name, setup(vmf, prop))
+        smuggle = Property(prop.real_name, setup_wrap(vmf, prop))
 
         def closure(ent: Entity) -> object:
             """Use the closure to store the smuggled setup data."""
-            return result(vmf, ent, smuggle)
+            return result_wrap(vmf, ent, smuggle)
 
         return closure
 
+    func.__doc__ = result.__doc__
     return func
 
 
@@ -451,6 +446,11 @@ class CondCall(Generic[CallResultT]):
             self._setup_data = {}  # type: Optional[Dict[int, Callable[[Entity], CallResultT]]]
         else:
             self._setup_data = None
+
+    @property
+    def __doc__(self) -> str:
+        """Description of the function."""
+        return self.func.__doc__
 
     def __call__(self, ent: Entity, conf: Property) -> CallResultT:
         """Execute the callback."""
@@ -851,7 +851,10 @@ def dump_conditions(file: TextIO) -> None:
 
 def dump_func_docs(file: TextIO, func: Callable):
     import inspect
-    docs = inspect.getdoc(func)
+    try:
+        docs = inspect.cleandoc(func.__doc__)
+    except AttributeError:
+        docs = ''
     if docs:
         print(docs, file=file)
     else:
