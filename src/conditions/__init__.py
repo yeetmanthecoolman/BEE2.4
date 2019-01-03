@@ -1298,7 +1298,7 @@ def remove_blank_inst(inst: Entity) -> None:
 
 
 @meta_cond(priority=0, only_once=True)
-def fix_catapult_targets(inst: Entity):
+def fix_catapult_targets() -> None:
     """Set faith plate targets to transmit to clients.
 
     This fixes some console spam in coop, and might improve trajectories
@@ -1308,8 +1308,12 @@ def fix_catapult_targets(inst: Entity):
         targ['spawnflags'] = '3'  # Transmit to client, ignoring PVS
 
 
-@make_result_setup('timedRelay')
-def res_timed_relay_setup(res: Property):
+@make_result('timedRelay')
+def res_timed_relay(vmf: srctools.VMF, res: Property):
+    """Generate a logic_relay with outputs delayed by a certain amount.
+
+    This allows triggering outputs based $timer_delay values.
+    """
     var = res['variable', consts.FixupVars.TIM_DELAY]
     name = res['targetname']
     disabled = res['disabled', '0']
@@ -1331,62 +1335,47 @@ def res_timed_relay_setup(res: Property):
     for out in itertools.chain(rep_outs, final_outs):
         out.comma_sep = False
 
-    return var, name, disabled, flags, final_outs, rep_outs
+    def func(inst: Entity):
+        relay = vmf.create_ent(
+            classname='logic_relay',
+            spawnflags=flags,
+            origin=inst['origin'],
+            targetname=local_name(inst, name),
+        )
 
+        relay['StartDisabled'] = resolve_value(inst, disabled)
+        delay = srctools.conv_float(resolve_value(inst, var))
 
-@make_result('timedRelay')
-def res_timed_relay(inst: Entity, res: Property):
-    """Generate a logic_relay with outputs delayed by a certain amount.
+        for off in range(int(math.ceil(delay))):
+            for out in rep_outs:
+                new_out = out.copy()
+                new_out.target = local_name(inst, new_out.target)
+                new_out.delay += off
+                new_out.comma_sep = False
+                relay.add_out(new_out)
 
-    This allows triggering outputs based $timer_delay values.
-    """
-    var, name, disabled, flags, final_outs, rep_outs = res.value
-
-    relay = VMF.create_ent(
-        classname='logic_relay',
-        spawnflags=flags,
-        origin=inst['origin'],
-        targetname=local_name(inst, name),
-    )
-
-    relay['StartDisabled'] = (
-        inst.fixup[disabled]
-        if disabled.startswith('$') else
-        disabled
-    )
-
-    delay = srctools.conv_float(
-        inst.fixup[var, '0']
-        if var.startswith('$') else
-        var
-    )
-
-    for off in range(int(math.ceil(delay))):
-        for out in rep_outs:
-            new_out = out.copy()  # type: Output
+        for out in final_outs:
+            new_out = out.copy()
             new_out.target = local_name(inst, new_out.target)
-            new_out.delay += off
+            new_out.delay += delay
             new_out.comma_sep = False
             relay.add_out(new_out)
-
-    for out in final_outs:
-        new_out = out.copy()
-        new_out.target = local_name(inst, new_out.target)
-        new_out.delay += delay
-        new_out.comma_sep = False
-        relay.add_out(new_out)
-
-make_result_setup('condition')(Condition.parse)
+    return func
 
 
 @make_result('condition')
-def res_sub_condition(base_inst: Entity, res: Property):
+def res_sub_condition(res: Property):
     """Check a different condition if the outer block is true."""
-    res.value.test(base_inst)
+    cond = Condition.parse(res)
+
+    def func(base_inst: Entity) -> None:
+        cond.test(base_inst)
+
+    return func
 
 
 @make_result('nextInstance')
-def res_break():
+def res_break() -> None:
     """Skip to the next instance.
 
     The value will be ignored.
@@ -1395,7 +1384,7 @@ def res_break():
 
 
 @make_result('endCondition', 'nextCondition')
-def res_end_condition():
+def res_end_condition() -> None:
     """Skip to the next condition.
 
     The value will be ignored.
@@ -1403,9 +1392,18 @@ def res_end_condition():
     raise EndCondition
 
 
-@make_result_setup('switch')
-def res_switch_setup(res: Property):
-    flag = None
+@make_result('switch')
+def res_switch(res: Property):
+    """Run the same flag multiple times with different arguments.
+
+    'method' is the way the search is done - first, last, random, or all.
+    'flag' is the name of the flag.
+    Each property group is a case to check - the property name is the flag
+    argument, and the contents are the results to execute in that case.
+    For 'random' mode, you can omit the flag to choose from all objects. In
+    this case the flag arguments are ignored.
+    """
+    flag_name = None
     method = SWITCH_TYPE.FIRST
     cases = []
     for prop in res:
@@ -1413,7 +1411,7 @@ def res_switch_setup(res: Property):
             cases.append(prop)
         else:
             if prop.name == 'flag':
-                flag = prop.value
+                flag_name = prop.value
                 continue
             if prop.name == 'method':
                 try:
@@ -1424,76 +1422,26 @@ def res_switch_setup(res: Property):
     if method is SWITCH_TYPE.LAST:
         cases[:] = cases[::-1]
 
-    return (
-        flag,
-        cases,
-        method,
-    )
+    def ent_func(inst: Entity) -> None:
+        if method is SWITCH_TYPE.RANDOM:
+            random.shuffle(cases)
 
+        for case in cases:
+            if flag_name is not None:
+                flag = Property(flag_name, case.real_name)
+                if not check_flag(flag, inst):
+                    continue
+            for result in case:
+                Condition.test_result(inst, result)
+            if method is not SWITCH_TYPE.ALL:
+                # All does them all, otherwise we quit now.
+                break
 
-@make_result('switch')
-def res_switch(inst: Entity, res: Property):
-    """Run the same flag multiple times with different arguments.
-
-    'method' is the way the search is done - first, last, random, or all.
-    'flag' is the name of the flag.
-    Each property group is a case to check - the property name is the flag
-    argument, and the contents are the results to execute in that case.
-    For 'random' mode, you can omit the flag to choose from all objects. In
-    this case the flag arguments are ignored.
-    """
-    flag_name, cases, method = res.value
-
-    if method is SWITCH_TYPE.RANDOM:
-        cases = cases[:]
-        random.shuffle(cases)
-
-    for case in cases:
-        if flag_name is not None:
-            flag = Property(flag_name, case.real_name)
-            if not check_flag(flag, inst):
-                continue
-        for res in case:
-            Condition.test_result(inst, res)
-        if method is not SWITCH_TYPE.ALL:
-            # All does them all, otherwise we quit now.
-            break
-
-
-@make_result_setup('staticPiston')
-def make_static_pist_setup(res: Property):
-    instances = (
-        'bottom_0', 'bottom_1', 'bottom_2', 'bottom_3',
-        'logic_0', 'logic_1', 'logic_2', 'logic_3',
-        'static_0', 'static_1', 'static_2', 'static_3', 'static_4',
-        'grate_low', 'grate_high',
-    )
-
-    if res.has_children():
-        # Pull from config
-        return {
-            name: instanceLocs.resolve_one(
-                res[name, ''],
-                error=False,
-            ) for name in instances
-        }
-    else:
-        # Pull from editoritems
-        if ':' in res.value:
-            from_item, prefix = res.value.split(':', 1)
-        else:
-            from_item = res.value
-            prefix = ''
-        return {
-            name: instanceLocs.resolve_one(
-                '<{}:bee2_{}{}>'.format(from_item, prefix, name),
-                error=False,
-            ) for name in instances
-        }
+    return ent_func
 
 
 @make_result('staticPiston')
-def make_static_pist(vmf: srctools.VMF, ent: Entity, res: Property):
+def make_static_pist(vmf: srctools.VMF, res: Property):
     """Convert a regular piston into a static version.
 
     This is done to save entities and improve lighting.
@@ -1505,56 +1453,88 @@ def make_static_pist(vmf: srctools.VMF, ent: Entity, res: Property):
     Alternatively, specify all instances via editoritems, by setting the value
     to the item ID optionally followed by a :prefix.
     """
+    inst_names = (
+        'bottom_0', 'bottom_1', 'bottom_2', 'bottom_3',
+        'logic_0', 'logic_1', 'logic_2', 'logic_3',
+        'static_0', 'static_1', 'static_2', 'static_3', 'static_4',
+        'grate_low', 'grate_high',
+    )
 
-    bottom_pos = ent.fixup.int(consts.FixupVars.PIST_BTM, 0)
-
-    if (
-        ent.fixup.int(consts.FixupVars.CONN_COUNT) > 0 or
-        ent.fixup.bool(consts.FixupVars.DIS_AUTO_DROP)
-    ):  # can it move?
-        ent.fixup[consts.FixupVars.BEE_PIST_IS_STATIC] = True
-
-        # Use instances based on the height of the bottom position.
-        val = res.value['bottom_' + str(bottom_pos)]
-        if val:  # Only if defined
-            ent['file'] = val
-
-        logic_file = res.value['logic_' + str(bottom_pos)]
-        if logic_file:
-            # Overlay an additional logic file on top of the original
-            # piston. This allows easily splitting the piston logic
-            # from the styled components
-            logic_ent = ent.copy()
-            logic_ent['file'] = logic_file
-            vmf.add_ent(logic_ent)
-            # If no connections are present, set the 'enable' value in
-            # the logic to True so the piston can function
-            logic_ent.fixup[consts.FixupVars.BEE_PIST_MANAGER_A] = (
-                ent.fixup.int(consts.FixupVars.CONN_COUNT) == 0
-            )
-    else:  # we are static
-        ent.fixup[consts.FixupVars.BEE_PIST_IS_STATIC] = False
-        if ent.fixup.bool(consts.FixupVars.PIST_IS_UP):
-            pos = bottom_pos = ent.fixup.int(consts.FixupVars.PIST_TOP, 1)
+    if res.has_children():
+        # Pull from config
+        instances = {
+            name: instanceLocs.resolve_one(
+                res[name, ''],
+                error=False,
+            ) for name in inst_names
+        }
+    else:
+        # Pull from editoritems
+        if ':' in res.value:
+            from_item, prefix = res.value.split(':', 1)
         else:
-            pos = bottom_pos
-        ent.fixup[consts.FixupVars.PIST_TOP] = ent.fixup[consts.FixupVars.PIST_BTM] = pos
+            from_item = res.value
+            prefix = ''
+        instances = {
+            name: instanceLocs.resolve_one(
+                '<{}:bee2_{}{}>'.format(from_item, prefix, name),
+                error=False,
+            ) for name in inst_names
+        }
 
-        val = res.value['static_' + str(pos)]
-        if val:
-            ent['file'] = val
+    def func(ent: Entity):
+        bottom_pos = ent.fixup.int(consts.FixupVars.PIST_BTM, 0)
 
-    # Add in the grating for the bottom as an overlay.
-    # It's low to fit the piston at minimum, or higher if needed.
-    grate = res.value[
-        'grate_high'
-        if bottom_pos > 0 else
-        'grate_low'
-    ]
-    if grate:
-        grate_ent = ent.copy()
-        grate_ent['file'] = grate
-        vmf.add_ent(grate_ent)
+        if (
+            ent.fixup.int(consts.FixupVars.CONN_COUNT) > 0 or
+            ent.fixup.bool(consts.FixupVars.DIS_AUTO_DROP)
+        ):  # can it move?
+            ent.fixup[consts.FixupVars.BEE_PIST_IS_STATIC] = True
+
+            # Use instances based on the height of the bottom position.
+            val = instances['bottom_' + str(bottom_pos)]
+            if val:  # Only if defined
+                ent['file'] = val
+
+            logic_file = instances['logic_' + str(bottom_pos)]
+            if logic_file:
+                # Overlay an additional logic file on top of the original
+                # piston. This allows easily splitting the piston logic
+                # from the styled components
+                logic_ent = ent.copy()
+                logic_ent['file'] = logic_file
+                vmf.add_ent(logic_ent)
+                # If no connections are present, set the 'enable' value in
+                # the logic to True so the piston can function
+                logic_ent.fixup[consts.FixupVars.BEE_PIST_MANAGER_A] = (
+                    ent.fixup.int(consts.FixupVars.CONN_COUNT) == 0
+                )
+        else:  # we are static
+            ent.fixup[consts.FixupVars.BEE_PIST_IS_STATIC] = False
+            if ent.fixup.bool(consts.FixupVars.PIST_IS_UP):
+                pos = bottom_pos = ent.fixup.int(consts.FixupVars.PIST_TOP, 1)
+            else:
+                pos = bottom_pos
+            # Set both variables to the same value, indicating it's static.
+            ent.fixup[consts.FixupVars.PIST_TOP] = pos
+            ent.fixup[consts.FixupVars.PIST_BTM] = pos
+
+            val = instances['static_' + str(pos)]
+            if val:
+                ent['file'] = val
+
+        # Add in the grating for the bottom as an overlay.
+        # It's low to fit the piston at minimum, or higher if needed.
+        grate = instances[
+            'grate_high'
+            if bottom_pos > 0 else
+            'grate_low'
+        ]
+        if grate:
+            grate_ent = ent.copy()
+            grate_ent['file'] = grate
+            vmf.add_ent(grate_ent)
+    return func
 
 
 @make_result('GooDebris')
