@@ -30,6 +30,7 @@ closure.
 import inspect
 import io
 import itertools
+import warnings
 import math
 import random
 from collections import defaultdict
@@ -37,11 +38,10 @@ from decimal import Decimal
 from enum import Enum
 
 from typing import (
-    Callable, Any, Iterable, Optional,
-    Dict, List, Tuple, NamedTuple, TypeVar,
-    Union,
-    Set,
-    TextIO,
+    Union, Optional, Any, Generic,
+    Callable, TypeVar,
+    Dict, List, Tuple, NamedTuple, Set,
+    TextIO, Iterable,
 )
 
 import comp_consts as consts
@@ -64,16 +64,19 @@ LOGGER = srctools.logger.get_logger(__name__, alias='cond.core')
 GLOBAL_INSTANCES = set()  # type: Set[str]
 ALL_INST = set()  # type: Set[str]
 VMF = None  # type: srctools.VMF
+MAP_RAND_SEED = ''
 
 conditions = []
-FLAG_LOOKUP = {}  # type: Dict[str, Callable[[srctools.VMF, Entity, Property], bool]]
-RESULT_LOOKUP = {}  # type: Dict[str, Callable[[srctools.VMF, Entity, Property], object]]
+FLAG_LOOKUP = {}  # type: Dict[str, CondCall[bool]]
+RESULT_LOOKUP = {}  # type: Dict[str, CondCall[Optional[object]]]
+
+# For legacy setup functions.
 RESULT_SETUP = {}  # type: Dict[str, Callable[[srctools.VMF, Property], object]]
 
 # Used to dump a list of the flags, results, meta-conditions
-ALL_FLAGS = []  # type: List[Tuple[str, Iterable[str], Callable[[srctools.VMF, Entity, Property], bool]]]
-ALL_RESULTS = []  # type: List[Tuple[str, Iterable[str], Callable[[srctools.VMF, Entity, Property], bool]]]
-ALL_META = []  # type: List[Tuple[str, Decimal, Callable[[srctools.VMF], None]]]
+ALL_FLAGS = []  # type: List[Tuple[str, Iterable[str], CondCall[bool]]]
+ALL_RESULTS = []  # type: List[Tuple[str, Iterable[str], CondCall[bool]]]
+ALL_META = []  # type: List[Tuple[str, Decimal, CondCall[None]]]
 
 GOO_LOCS = {}  # A mapping from blocks containing goo to the top face
 GOO_FACE_LOC = {}  # A mapping from face origin -> face for top faces.
@@ -204,7 +207,6 @@ class Condition:
         self.else_results = else_results or []
         self.priority = priority
         self.source = source
-        self.setup()
 
     def __repr__(self):
         return (
@@ -265,7 +267,7 @@ class Condition:
     def test_result(inst: Entity, res: Property) -> Union[bool, object]:
         """Execute the given result."""
         try:
-            func = RESULT_LOOKUP[res.name]
+            condcall = RESULT_LOOKUP[res.name]
         except KeyError:
             err_msg = '"{name}" is not a valid condition result!'.format(
                 name=res.real_name,
@@ -278,7 +280,7 @@ class Condition:
                 # Delete this so it doesn't re-fire..
                 return RES_EXHAUSTED
         else:
-            return func(VMF, inst, res)
+            return condcall(inst, res)
 
     def test(self, inst: Entity) -> None:
         """Try to satisfy this condition on the given instance."""
@@ -289,9 +291,15 @@ class Condition:
                 break
         results = self.results if success else self.else_results
         for res in results[:]:
-            should_del = self.test_result(inst, res)
-            if should_del is RES_EXHAUSTED:
-                results.remove(res)
+            try:
+                should_del = self.test_result(inst, res)
+                if should_del is RES_EXHAUSTED:
+                    results.remove(res)
+            except (NextInstance, EndCondition):
+                raise
+            except:
+                LOGGER.error('Fail in result "{}":', res.name)
+                raise
 
 
 AnnCallT = TypeVar('AnnCallT')
@@ -382,6 +390,102 @@ def annotation_caller(
     ), ann_order
 
 
+CallResultT = TypeVar('CallResultT')
+
+
+def conv_setup_pair(
+    setup: Callable[..., Any],
+    result: Callable[..., CallResultT],
+) -> Callable[
+    [srctools.VMF, Property],
+    Callable[[Entity], CallResultT]
+]:
+    """Convert the old explict setup function into a new closure."""
+    setup, ann_order = annotation_caller(
+        setup,
+        srctools.VMF, Property,
+    )
+    result, ann_order = annotation_caller(
+        result,
+        srctools.VMF, Entity, Property,
+    )
+
+    def func(vmf: srctools.VMF, prop: Property):
+        """Replacement function which performs the legacy behaviour."""
+        # The old system for setup functions - smuggle them in by
+        # setting Property.value to an arbitrary object.
+        smuggle = Property(prop.real_name, setup(vmf, prop))
+
+        def closure(ent: Entity) -> object:
+            """Use the closure to store the smuggled setup data."""
+            return result(vmf, ent, smuggle)
+
+        return closure
+
+    return func
+
+
+class CondCall(Generic[CallResultT]):
+    """A result or flag callback.
+
+    This should be called to execute it.
+    """
+    __slots__ = ['func', 'group', '_cback', '_setup_data']
+
+    def __init__(
+        self,
+        func: Callable[..., Union[
+            CallResultT,
+            Callable[[Entity], CallResultT],
+        ]],
+        group: str,
+    ):
+        self.func = func
+        self.group = group
+        self._cback, arg_order = annotation_caller(
+            func,
+            srctools.VMF, Entity, Property,
+        )
+        if Entity not in arg_order:
+            # We have setup functions.
+            self._setup_data = {}  # type: Optional[Dict[int, Callable[[Entity], CallResultT]]]
+        else:
+            self._setup_data = None
+
+    def __call__(self, ent: Entity, conf: Property) -> CallResultT:
+        """Execute the callback."""
+        if self._setup_data is None:
+            return self._cback(ent.map, ent, conf)
+        else:
+            # Execute setup functions if required.
+            try:
+                cback = self._setup_data[id(conf)]
+            except KeyError:
+                # The None here is the entity, which is always unused
+                # for setup functions!
+                cback = self._setup_data[id(conf)] = self._cback(ent.map, None, conf)
+
+            if not callable(cback):
+                # We don't actually have a setup func,
+                # this func just doesn't care about entities.
+                # Fix this incorrect assumption, then return
+                # the result.
+                self._setup_data = None
+                return cback
+
+            return cback(ent)
+
+
+def _get_cond_group(func: Callable) -> str:
+    """Get the condition group hint for a function."""
+    try:
+        return func.__globals__['COND_MOD_NAME']
+    except KeyError:
+        group = func.__globals__['__name__']
+        LOGGER.info('No name for module "{}"!', group)
+        return group
+
+
 def add_meta(func, priority: Union[Decimal, int], only_once=True):
     """Add a metacondition, which executes a function at a priority level.
 
@@ -399,11 +503,10 @@ def add_meta(func, priority: Union[Decimal, int], only_once=True):
         dec_priority,
     )
 
-    RESULT_LOOKUP[name], arg_order = annotation_caller(
+    # We don't care about setup functions for this.
+    RESULT_LOOKUP[name] = CondCall(
         func,
-        srctools.VMF,
-        Entity,
-        Property,
+        _get_cond_group(func),
     )
 
     cond = Condition(
@@ -431,16 +534,11 @@ def meta_cond(priority: int=0, only_once: bool=True):
 def make_flag(orig_name: str, *aliases: str):
     """Decorator to add flags to the lookup."""
     def x(func):
-        try:
-            func.group = func.__globals__['COND_MOD_NAME']
-        except KeyError:
-            func.group = func.__globals__['__name__']
-            LOGGER.info('No name for module "{}"!', func.group)
-
-        wrapper = annotation_caller(func, srctools.VMF, Entity, Property)
         ALL_FLAGS.append(
             (orig_name, aliases, func)
         )
+        wrapper = CondCall(func, _get_cond_group(func))
+
         FLAG_LOOKUP[orig_name.casefold()] = wrapper
         for name in aliases:
             FLAG_LOOKUP[name.casefold()] = wrapper
@@ -450,17 +548,21 @@ def make_flag(orig_name: str, *aliases: str):
 
 def make_result(orig_name: str, *aliases: str):
     """Decorator to add results to the lookup."""
-    def x(func):
-        try:
-            func.group = func.__globals__['COND_MOD_NAME']
-        except KeyError:
-            func.group = func.__globals__['__name__']
-            LOGGER.info('No name for module "{}"!', func.group)
-
-        wrapper = annotation_caller(func, srctools.VMF, Entity, Property)
+    def x(result_func):
         ALL_RESULTS.append(
-            (orig_name, aliases, func)
+            (orig_name, aliases, result_func)
         )
+
+        # Legacy setup func support.
+        try:
+            setup_func = RESULT_SETUP[orig_name.casefold()]
+        except KeyError:
+            func = result_func
+        else:
+            # Combine the legacy functions into one using a closure.
+            func = conv_setup_pair(setup_func, result_func)
+
+        wrapper = CondCall(func, _get_cond_group(result_func))
         RESULT_LOOKUP[orig_name.casefold()] = wrapper
         for name in aliases:
             RESULT_LOOKUP[name.casefold()] = wrapper
@@ -469,11 +571,14 @@ def make_result(orig_name: str, *aliases: str):
 
 
 def make_result_setup(*names: str):
-    """Decorator to do setup for this result."""
+    """Legacy setup function for results. This is no longer used."""
+    warnings.warn('Use closure system instead.', DeprecationWarning)
+
     def x(func: Callable[..., Any]):
-        wrapper = annotation_caller(func, srctools.VMF, Property)
         for name in names:
-            RESULT_SETUP[name.casefold()] = wrapper
+            if name.casefold() in RESULT_LOOKUP:
+                raise ValueError('Legacy setup called after making result!')
+            RESULT_SETUP[name.casefold()] = func
         return func
     return x
 
@@ -551,7 +656,7 @@ def check_flag(flag: Property, inst: Entity):
     else:
         desired_result = True
     try:
-        func = FLAG_LOOKUP[name]
+        condcall = FLAG_LOOKUP[name]
     except KeyError:
         err_msg = '"{}" is not a valid condition flag!'.format(name)
         if utils.DEV_MODE:
@@ -562,7 +667,7 @@ def check_flag(flag: Property, inst: Entity):
             # Skip these conditions..
             return False
 
-    res = func(VMF, inst, flag)
+    res = condcall(inst, flag)
     return res == desired_result
 
 
@@ -704,7 +809,7 @@ def dump_conditions(file: TextIO) -> None:
         print('# ' + name, file=file)
         print('<!------->', file=file)
 
-        lookup_grouped = defaultdict(list)  # type: Dict[str, List[Tuple[str, Tuple[str, ...], Callable]]]
+        lookup_grouped = defaultdict(list)  # type: Dict[str, List[Tuple[str, Iterable[str], CondCall]]]
 
         for flag_key, aliases, func in lookup:
             group = getattr(func, 'group', 'ERROR')
@@ -1474,9 +1579,9 @@ def res_goo_debris(res: Property):
         rand_list = weighted_random(
             rand_count,
             res['weights', ''],
-        )
+        )  # type: Optional[List[int]]
     else:
-        rand_list = None  # type: Optional[List[int]]
+        rand_list = None
     chance = res.int('chance', 30) / 100
     file = res['file']
     offset = res.int('offset', 0)
