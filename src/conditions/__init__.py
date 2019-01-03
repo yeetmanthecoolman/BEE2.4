@@ -504,7 +504,7 @@ def add_meta(func, priority: Union[Decimal, int], only_once=True):
     )
 
     # We don't care about setup functions for this.
-    RESULT_LOOKUP[name] = CondCall(
+    RESULT_LOOKUP[name] = cond_call = CondCall(
         func,
         _get_cond_group(func),
     )
@@ -520,7 +520,7 @@ def add_meta(func, priority: Union[Decimal, int], only_once=True):
             Property('endCondition', '')
         )
     conditions.append(cond)
-    ALL_META.append((name, dec_priority, func))
+    ALL_META.append((name, dec_priority, cond_call))
 
 
 def meta_cond(priority: int=0, only_once: bool=True):
@@ -534,10 +534,11 @@ def meta_cond(priority: int=0, only_once: bool=True):
 def make_flag(orig_name: str, *aliases: str):
     """Decorator to add flags to the lookup."""
     def x(func):
-        ALL_FLAGS.append(
-            (orig_name, aliases, func)
-        )
         wrapper = CondCall(func, _get_cond_group(func))
+
+        ALL_FLAGS.append(
+            (orig_name, aliases, wrapper)
+        )
 
         FLAG_LOOKUP[orig_name.casefold()] = wrapper
         for name in aliases:
@@ -549,10 +550,6 @@ def make_flag(orig_name: str, *aliases: str):
 def make_result(orig_name: str, *aliases: str):
     """Decorator to add results to the lookup."""
     def x(result_func):
-        ALL_RESULTS.append(
-            (orig_name, aliases, result_func)
-        )
-
         # Legacy setup func support.
         try:
             setup_func = RESULT_SETUP[orig_name.casefold()]
@@ -563,6 +560,11 @@ def make_result(orig_name: str, *aliases: str):
             func = conv_setup_pair(setup_func, result_func)
 
         wrapper = CondCall(func, _get_cond_group(result_func))
+
+        ALL_RESULTS.append(
+            (orig_name, aliases, wrapper)
+        )
+
         RESULT_LOOKUP[orig_name.casefold()] = wrapper
         for name in aliases:
             RESULT_LOOKUP[name.casefold()] = wrapper
