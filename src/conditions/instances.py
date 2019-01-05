@@ -202,8 +202,12 @@ def res_set_inst_var(inst: Entity, res: Property):
     inst.fixup[var_name] = conditions.resolve_value(inst, val)
 
 
-@make_result_setup('mapInstVar')
-def res_map_inst_var_setup(res: Property):
+@make_result('mapInstVar')
+def res_map_inst_var(res: Property):
+    """Set one instance var based on the value of another.
+
+    The first value is the in -> out var, and all following are values to map.
+    """
     table = {}
     res_iter = iter(res)
     first_prop = next(res_iter)
@@ -211,21 +215,12 @@ def res_map_inst_var_setup(res: Property):
     for prop in res_iter:
         table[prop.real_name] = prop.value
 
-    out = in_name, out_name, table
-    return out if all(out) else None
-
-
-@make_result('mapInstVar')
-def res_map_inst_var(inst: Entity, res: Property):
-    """Set one instance var based on the value of another.
-
-    The first value is the in -> out var, and all following are values to map.
-    """
-    in_name, out_name, table = res.value  # type: str, str, dict
-    try:
-        inst.fixup[out_name] = table[inst.fixup[in_name]]
-    except KeyError:
-        pass
+    def func(inst: Entity):
+        try:
+            inst.fixup[out_name] = table[inst.fixup[in_name]]
+        except KeyError:
+            pass
+    return func
 
 
 @make_result('clearOutputs', 'clearOutput')
@@ -294,31 +289,12 @@ def res_replace_instance(inst: Entity, res: Property):
 GLOBAL_INPUT_ENTS = {}  # type: Dict[Optional[str], Entity]
 
 
-@make_result_setup('GlobalInput')
-def res_global_input_setup(res: Property):
-    if res.has_children():
-        name = res['name', '']
-        inp_name, inp_command = Output.parse_name(res['input'])
-        return name, Output(
-            out=res['output', 'OnTrigger'],
-            targ=res['target', ''],
-            inp=inp_command,
-            inst_in=inp_name,
-            delay=srctools.conv_float(res['delay', '']),
-            param=res['param', ''],
-        )
-    else:
-        out = Output.parse(res)
-        out.output = ''  # Don't need to store GlobalInput...
-        return '', out
-
-
 @make_result('GlobalInput')
-def res_global_input(vmf: VMF, inst: Entity, res: Property):
+def res_global_input(vmf: VMF, res: Property):
     """Trigger an input either on map spawn, or when a relay is triggered.
 
-    Arguments:  
-    
+    Arguments:
+
     - `Input`: the input to use, either a name or an `instance:` command.
     - `Target`: If set, a local name to send commands to. Otherwise, the instance itself.
     - `Delay`: Number of seconds to delay the input.
@@ -331,22 +307,39 @@ def res_global_input(vmf: VMF, inst: Entity, res: Property):
     Alternatively pass a string VMF-style output, which only provides
     OnMapSpawn functionality.
     """
-    relay_name, out = res.value
-
-    output = out.copy()  # type: Output
-
-    if output.target:
-        output.target = conditions.local_name(
-            inst,
-            conditions.resolve_value(inst, output.target)
+    if res.has_children():
+        name = res['name', '']
+        inp_name, inp_command = Output.parse_name(res['input'])
+        out = Output(
+            out=res['output', 'OnTrigger'],
+            targ=res['target', ''],
+            inp=inp_command,
+            inst_in=inp_name,
+            delay=srctools.conv_float(res['delay', '']),
+            param=res['param', ''],
         )
     else:
-        output.target = inst['targetname']
+        out = Output.parse(res)
+        out.output = ''  # Don't need to store GlobalInput...
+        name = ''
 
-    relay_name = conditions.resolve_value(inst, relay_name)
-    output.params = conditions.resolve_value(inst, output.params)
+    def func(inst: Entity) -> None:
 
-    global_input(vmf, inst['origin'], output, relay_name)
+        output = out.copy()
+
+        if output.target:
+            output.target = conditions.local_name(
+                inst,
+                conditions.resolve_value(inst, output.target)
+            )
+        else:
+            output.target = inst['targetname']
+
+        relay_name = conditions.resolve_value(inst, name)
+        output.params = conditions.resolve_value(inst, output.params)
+
+        global_input(vmf, inst['origin'], output, relay_name)
+    return func
 
 
 def global_input(
