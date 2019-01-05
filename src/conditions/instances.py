@@ -252,7 +252,7 @@ def res_local_targetname(inst: Entity, res: Property):
 
 
 @make_result('replaceInstance')
-def res_replace_instance(inst: Entity, res: Property):
+def res_replace_instance(vmf: VMF, inst: Entity, res: Property):
     """Replace an instance with another entity.
 
     `keys` and `localkeys` defines the new keyvalues used.
@@ -261,7 +261,6 @@ def res_replace_instance(inst: Entity, res: Property):
     If `keep_instance` is true, the instance entity will be kept instead of
     removed.
     """
-    import vbsp
 
     origin = Vec.from_str(inst['origin'])
     angles = inst['angles']
@@ -276,7 +275,7 @@ def res_replace_instance(inst: Entity, res: Property):
     # Ensure there's a classname, just in case.
     new_ent['classname'] = 'info_null'
 
-    vbsp.VMF.add_ent(new_ent)
+    vmf.add_ent(new_ent)
 
     conditions.set_ent_keys(new_ent, inst, res)
 
