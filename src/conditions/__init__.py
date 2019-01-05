@@ -448,7 +448,7 @@ class CondCall(Generic[CallResultT]):
             self._setup_data = None
 
     @property
-    def __doc__(self) -> str:
+    def __doc__(self) -> Optional[str]:
         """Description of the function."""
         return self.func.__doc__
 
@@ -852,6 +852,7 @@ def dump_conditions(file: TextIO) -> None:
 
 
 def dump_func_docs(file: TextIO, func: Callable):
+    """Read the docstring from a function."""
     import inspect
     try:
         docs = inspect.cleandoc(func.__doc__)
