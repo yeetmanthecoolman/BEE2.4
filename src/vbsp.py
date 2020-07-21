@@ -1924,7 +1924,7 @@ def main() -> None:
         LOGGER.error('"User" error detected, aborting compile: ', exc_info=True)
         vmf = error.make_map()
         # Act like this was made normally, running VBSP.
-        save(vmf, path)
+        save(vmf, new_path)
         run_vbsp(
             vbsp_args=new_args,
             path=path,
