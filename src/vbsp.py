@@ -41,6 +41,7 @@ from precomp import (
     music,
     rand,
 )
+from precomp.errors import UserError
 import consts
 import editoritems
 
@@ -1604,8 +1605,11 @@ def run_vbsp(vbsp_args, path, new_path=None) -> None:
     If new_path is passed VBSP will be run on the map in styled/, and we'll
     read through the output to find the entity counts.
     """
-
     is_peti = new_path is not None
+    # We always need to do this - VRAD can't easily determine if the map is
+    # a Hammer one.
+    make_vrad_config(is_peti)
+
 
     # We can't overwrite the original vmf, so we run VBSP from a separate
     # location.
@@ -1846,7 +1850,9 @@ def main() -> None:
             vbsp_args=old_args,
             path=path,
         )
-    else:
+        return
+
+    try:
         LOGGER.info("PeTI map detected!")
 
         LOGGER.info("Loading settings...")
@@ -1907,6 +1913,18 @@ def main() -> None:
         vmf.spawn['BEE2_is_preview'] = IS_PREVIEW
 
         save(vmf, new_path)
+        run_vbsp(
+            vbsp_args=new_args,
+            path=path,
+            new_path=new_path,
+        )
+    except UserError as error:
+        # The user did something wrong, so the map is invalid.
+        # Compile a special map which displays the message.
+        LOGGER.error('"User" error detected, aborting compile: ', exc_info=True)
+        vmf = error.make_map()
+        # Act like this was made normally, running VBSP.
+        save(vmf, path)
         run_vbsp(
             vbsp_args=new_args,
             path=path,
