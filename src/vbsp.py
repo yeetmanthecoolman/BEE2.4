@@ -1912,24 +1912,19 @@ def main() -> None:
         # Set this so VRAD can know.
         vmf.spawn['BEE2_is_preview'] = IS_PREVIEW
 
-        save(vmf, new_path)
-        run_vbsp(
-            vbsp_args=new_args,
-            path=path,
-            new_path=new_path,
-        )
     except UserError as error:
         # The user did something wrong, so the map is invalid.
         # Compile a special map which displays the message.
         LOGGER.error('"User" error detected, aborting compile: ', exc_info=True)
         vmf = error.make_map()
-        # Act like this was made normally, running VBSP.
-        save(vmf, new_path)
-        run_vbsp(
-            vbsp_args=new_args,
-            path=path,
-            new_path=new_path,
-        )
+
+    # In both user-error and normal cases, we just save and run VBSP.
+    save(vmf, new_path)
+    run_vbsp(
+        vbsp_args=new_args,
+        path=path,
+        new_path=new_path,
+    )
 
     LOGGER.info("BEE2 VBSP hook finished!")
 
