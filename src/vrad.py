@@ -31,6 +31,7 @@ from postcomp import music, screenshot
 from postcomp import (
     coop_responses,
     filter,
+    user_error,
 )
 import utils
 
