@@ -1606,10 +1606,6 @@ def run_vbsp(vbsp_args, path, new_path=None) -> None:
     read through the output to find the entity counts.
     """
     is_peti = new_path is not None
-    # We always need to do this - VRAD can't easily determine if the map is
-    # a Hammer one.
-    make_vrad_config(is_peti)
-
 
     # We can't overwrite the original vmf, so we run VBSP from a separate
     # location.
@@ -1906,17 +1902,17 @@ def main() -> None:
             for out in ent.outputs:
                 out.comma_sep = False
 
-        # Ensure VRAD knows that the map is PeTI, it can't figure that out
-        # from parameters.
-        vmf.spawn['BEE2_is_peti'] = True
-        # Set this so VRAD can know.
-        vmf.spawn['BEE2_is_preview'] = IS_PREVIEW
-
     except UserError as error:
         # The user did something wrong, so the map is invalid.
         # Compile a special map which displays the message.
         LOGGER.error('"User" error detected, aborting compile: ', exc_info=True)
         vmf = error.make_map()
+
+    # Ensure VRAD knows that the map is PeTI, it can't figure that out
+    # from parameters.
+    vmf.spawn['BEE2_is_peti'] = True
+    # Set this so VRAD can know.
+    vmf.spawn['BEE2_is_preview'] = IS_PREVIEW
 
     # In both user-error and normal cases, we just save and run VBSP.
     save(vmf, new_path)
