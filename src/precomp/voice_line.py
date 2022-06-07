@@ -5,9 +5,11 @@ from typing import List, Set, NamedTuple, Iterator
 
 import srctools.logger
 import vbsp
-from precomp import options as vbsp_options, packing, conditions, rand
+from precomp import corridor, options as vbsp_options, packing, conditions, rand
 from BEE2_config import ConfigFile
 from srctools import Property, Vec, VMF, Output, Entity
+
+from precomp.collisions import Collisions
 
 
 LOGGER = srctools.logger.get_logger(__name__)
@@ -47,12 +49,12 @@ fake_inst = VMF().create_ent(
 )
 
 
-def has_responses() -> bool:
+def has_responses(info: corridor.Info) -> bool:
     """Check if we have any valid 'response' data for Coop."""
-    return vbsp.GAME_MODE == 'COOP' and 'CoopResponses' in QUOTE_DATA
+    return info.is_coop and 'CoopResponses' in QUOTE_DATA
 
 
-def encode_coop_responses(vmf: VMF, pos: Vec, allow_dings: bool, voice_attrs: dict) -> None:
+def encode_coop_responses(vmf: VMF, pos: Vec, allow_dings: bool, info: corridor.Info) -> None:
     """Write the coop responses information into the map."""
     config = ConfigFile('bee2/resp_voice.cfg', in_conf_folder=False)
     response_block = QUOTE_DATA.find_key('CoopResponses', or_blank=True)
@@ -73,7 +75,7 @@ def encode_coop_responses(vmf: VMF, pos: Vec, allow_dings: bool, voice_attrs: di
             continue
 
         voice_attr = RESP_HAS_NAMES.get(section.name, '')
-        if voice_attr and not voice_attrs[voice_attr]:
+        if voice_attr and not info.has_attr(voice_attr):
             # This response category isn't present.
             continue
 
@@ -115,7 +117,8 @@ def res_quote_event(res: Property):
 
 
 def find_group_quotes(
-    vmf: VMF,
+    coll: Collisions,
+    info: corridor.Info,
     group: Property,
     mid_quotes,
     allow_mid_voices,
@@ -142,7 +145,7 @@ def find_group_quotes(
             if name in ('priority', 'name', 'id', 'line') or name.startswith('line_'):
                 # Not flags!
                 continue
-            if not conditions.check_flag(vmf, flag, fake_inst):
+            if not conditions.check_flag(flag, coll, info, fake_inst):
                 valid_quote = False
                 break
 
@@ -270,12 +273,11 @@ def add_quote(
         name = prop.name.casefold()
 
         if name == 'file':
-            vmf.create_ent(
-                classname='func_instance',
-                targetname='',
+            conditions.add_inst(
+                vmf,
                 file=INST_PREFIX + prop.value,
                 origin=quote_loc,
-                fixup_style='2',  # No fixup
+                no_fixup=True,
             )
         elif name == 'choreo':
             # If the property has children, the children are a set of sequential
@@ -439,9 +441,10 @@ def get_studio_loc() -> Vec:
 
 
 def add_voice(
-    voice_attrs: dict,
     style_vars: dict,
     vmf: VMF,
+    coll: Collisions,
+    info: corridor.Info,
     use_priority=True,
 ) -> None:
     """Add a voice line to the map."""
@@ -455,13 +458,11 @@ def add_voice(
     quote_loc = get_studio_loc()
     if quote_base:
         LOGGER.info('Adding Base instance!')
-        vmf.create_ent(
-            classname='func_instance',
+        conditions.add_inst(
+            vmf,
             targetname='voice',
             file=INST_PREFIX + quote_base,
-            angles='0 0 0',
             origin=quote_loc,
-            fixup_style='0',
         )
 
     # Either box in with nodraw, or place the voiceline studio.
@@ -512,20 +513,18 @@ def add_voice(
 
     LOGGER.info('Quote events: {}', list(QUOTE_EVENTS.keys()))
 
-    if has_responses():
+    if has_responses(info):
         LOGGER.info('Generating responses data..')
-        encode_coop_responses(vmf, quote_loc, allow_dings, voice_attrs)
+        encode_coop_responses(vmf, quote_loc, allow_dings, info)
 
     for ind, file in enumerate(QUOTE_EVENTS.values()):
         if not file:
             continue
-        vmf.create_ent(
-            classname='func_instance',
+        conditions.add_inst(
+            vmf,
             targetname='voice_event_' + str(ind),
             file=file,
-            angles='0 0 0',
             origin=quote_loc,
-            fixup_style='0',
         )
 
     # Determine the flags that enable/disable specific lines based on which
@@ -534,18 +533,15 @@ def add_voice(
         'General', 'player_model', 'PETI',
     ).casefold()
 
-    is_coop = (vbsp.GAME_MODE == 'COOP')
-    is_sp = (vbsp.GAME_MODE == 'SP')
-
     player_flags = {
-        'sp': is_sp,
-        'coop': is_coop,
-        'atlas': is_coop or player_model == 'atlas',
-        'pbody': is_coop or player_model == 'pbody',
-        'bendy': is_sp and player_model == 'peti',
-        'chell': is_sp and player_model == 'sp',
-        'human': is_sp and player_model in ('peti', 'sp'),
-        'robot': is_coop or player_model in ('atlas', 'pbody'),
+        'sp': info.is_sp,
+        'coop': info.is_coop,
+        'atlas': info.is_coop or player_model == 'atlas',
+        'pbody': info.is_coop or player_model == 'pbody',
+        'bendy': info.is_sp and player_model == 'peti',
+        'chell': info.is_sp and player_model == 'sp',
+        'human': info.is_sp and player_model in ('peti', 'sp'),
+        'robot': info.is_coop or player_model in ('atlas', 'pbody'),
     }
     # All which are True.
     player_flag_set = {val for val, flag in player_flags.items() if flag}
@@ -561,7 +557,8 @@ def add_voice(
 
         possible_quotes = sorted(
             find_group_quotes(
-                vmf,
+                coll,
+                info,
                 group,
                 mid_quotes,
                 use_dings=use_dings,
@@ -612,7 +609,7 @@ def add_voice(
         # This ensures it is heard regardless of location.
         # This is used for Cave and core Wheatley.
         LOGGER.info('Using microphones...')
-        if vbsp.GAME_MODE == 'SP':
+        if info.is_sp:
             vmf.create_ent(
                 classname='env_microphone',
                 targetname='player_speaker_sp',

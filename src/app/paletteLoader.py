@@ -7,12 +7,14 @@ import zipfile
 import random
 import io
 from uuid import UUID, uuid4, uuid5
-import utils
+
 
 import srctools.logger
 from srctools import Property, NoKeyError, KeyValError
 
 from localisation import gettext
+from app import config
+import utils
 
 
 LOGGER = srctools.logger.get_logger(__name__)
@@ -209,7 +211,7 @@ class Palette:
         readonly: bool = False,
         group: str = '',
         filename: str = None,
-        settings: Property | None = None,
+        settings: config.Config | None = None,
         uuid: UUID = None,
     ) -> None:
         # Name of the palette
@@ -269,11 +271,15 @@ class Palette:
                 uuid = uuid4()
                 needs_save = True
 
-        settings: Property | None
+        settings: config.Config | None
         try:
-            settings = props.find_key('Settings')
+            settings_conf = props.find_key('Settings')
         except NoKeyError:
             settings = None
+        else:
+            settings, upgraded_settings = config.parse_conf(settings_conf)
+            if upgraded_settings:
+                needs_save = True
 
         pal = Palette(
             name,
@@ -318,8 +324,9 @@ class Palette:
             del props['TransName']
 
         if self.settings is not None:
-            self.settings.name = 'Settings'
-            props.append(self.settings.copy())
+            settings_prop = Property('settings', [])
+            settings_prop.extend(config.build_conf(self.settings))
+            props.append(settings_prop)
 
         # We need to write a new file, determine a valid path.
         # Use a hash to ensure it's a valid path (without '-' if negative)
@@ -372,7 +379,8 @@ def load_palettes() -> Iterator[Palette]:
         try:
             if name.endswith(PAL_EXT):
                 try:
-                    yield Palette.parse(path)
+                    with srctools.logger.context(name):
+                        yield Palette.parse(path)
                 except KeyValError as exc:
                     # We don't need the traceback, this isn't an error in the app
                     # itself.

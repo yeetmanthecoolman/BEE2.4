@@ -6,6 +6,7 @@ Does stuff related to the actual games.
 - Generating and saving editoritems/vbsp_config
 """
 from __future__ import annotations
+from typing import Optional, Union, Any, Type, IO
 from pathlib import Path
 from collections.abc import Iterable, Iterator
 
@@ -24,7 +25,7 @@ import copy
 import webbrowser
 from atomicwrites import atomic_write
 
-from BEE2_config import ConfigFile, GEN_OPTS
+from BEE2_config import ConfigFile
 from srctools import (
     Vec, VPK, Vec_tuple,
     Property,
@@ -33,14 +34,12 @@ from srctools import (
 )
 import srctools.logger
 import srctools.fgd
-from app import backup, tk_tools, resource_gen, TK_ROOT, DEV_MODE
+from app import backup, config, tk_tools, resource_gen, TK_ROOT, DEV_MODE
 from localisation import gettext
 import loadScreen
 import packages.template_brush
 import editoritems
 import utils
-
-from typing import Optional, Union, Any, Type, IO
 
 
 try:
@@ -58,7 +57,7 @@ selectedGame_radio = IntVar(value=0)
 game_menu: Optional[Menu] = None
 
 # Translated text from basemodui.txt.
-TRANS_DATA = {}
+TRANS_DATA: dict[str, str] = {}
 
 CONFIG = ConfigFile('games.cfg')
 
@@ -447,16 +446,16 @@ class Game:
                         )
                     continue
 
-                with atomic_write(info_path, overwrite=True, encoding='utf8') as file:
+                with atomic_write(info_path, overwrite=True, encoding='utf8') as file2:
                     for line in data:
-                        file.write(line)
+                        file2.write(line)
         if not add_line:
             # Restore the original files!
 
-            for name, file, ext in FILES_TO_BACKUP:
-                item_path = self.abs_path(file + ext)
-                backup_path = self.abs_path(file + '_original' + ext)
-                old_version = self.abs_path(file + '_styles' + ext)
+            for name, filename, ext in FILES_TO_BACKUP:
+                item_path = self.abs_path(f"{filename}{ext}")
+                backup_path = self.abs_path(f'{filename}_original{ext}')
+                old_version = self.abs_path(f'{filename}_styles{ext}')
                 if os.path.isfile(old_version):
                     LOGGER.info('Restoring Stylechanger version of "{}"!', name)
                     shutil.copy(old_version, item_path)
@@ -503,7 +502,7 @@ class Game:
         fgd = srctools.FGD()
 
         for ent in engine_fgd:
-            if ent.classname.startswith('comp_'):
+            if ent.classname.startswith('comp_') or ent.classname == "hammer_notes":
                 fgd.entities[ent.classname] = ent
                 ent.strip_tags(FGD_TAGS)
 
@@ -525,21 +524,20 @@ class Game:
 
     def cache_invalid(self) -> bool:
         """Check to see if the cache is valid."""
-        if GEN_OPTS.get_bool('General', 'preserve_bee2_resource_dir'):
+        if config.get_cur_conf(config.GenOptions).preserve_resources:
             # Skipped always
             return False
 
         # Check lengths, to ensure we re-extract if packages were removed.
-        if len(packages.packages) != len(self.mod_times):
+        if len(packages.LOADED.packages) != len(self.mod_times):
             LOGGER.info('Need to extract - package counts inconsistent!')
             return True
 
-        if any(
+        return any(
             pack.is_stale(self.mod_times.get(pack_id.casefold(), 0))
             for pack_id, pack in
-            packages.packages.items()
-        ):
-            return True
+            packages.LOADED.packages.items()
+        )
 
     def refresh_cache(self, already_copied: set[str]) -> None:
         """Copy over the resource files into this game.
@@ -584,12 +582,12 @@ class Game:
         for path in [INST_PATH, 'bee2']:
             abs_path = self.abs_path(path)
             for dirpath, dirnames, filenames in os.walk(abs_path):
-                for file in filenames:
+                for filename in filenames:
                     # Keep VMX backups, disabled editor models, and the coop
                     # gun instance.
-                    if file.endswith(('.vmx', '.mdl_dis', 'tag_coop_gun.vmf')):
+                    if filename.endswith(('.vmx', '.mdl_dis', 'tag_coop_gun.vmf')):
                         continue
-                    path = os.path.join(dirpath, file)
+                    path = os.path.join(dirpath, filename)
 
                     if path.casefold() not in already_copied:
                         LOGGER.info('Deleting: {}', path)
@@ -597,7 +595,7 @@ class Game:
 
         # Save the new cache modification date.
         self.mod_times.clear()
-        for pack_id, pack in packages.packages.items():
+        for pack_id, pack in packages.LOADED.packages.items():
             self.mod_times[pack_id.casefold()] = pack.get_modtime()
         self.save()
         CONFIG.save_check()
@@ -721,6 +719,7 @@ class Game:
                         all_items=all_items,
                         renderables=renderables,
                         vbsp_conf=vbsp_config,
+                        packset=packages.LOADED,  # TODO
                         selected_style=style,
                         resources=resources,
                     ))
@@ -825,7 +824,7 @@ class Game:
             self.edit_gameinfo(True)
             export_screen.step('EXP', 'gameinfo')
 
-            if not GEN_OPTS.get_bool('General', 'preserve_bee2_resource_dir'):
+            if not config.get_cur_conf(config.GenOptions).preserve_resources:
                 LOGGER.info('Adding ents to FGD.')
                 self.edit_fgd(True)
             export_screen.step('EXP', 'fgd')
@@ -834,7 +833,7 @@ class Game:
             # This ensures editoritems won't be half-written.
             LOGGER.info('Writing Editoritems script...')
             with atomic_write(self.abs_path('portal2_dlc2/scripts/editoritems.txt'), overwrite=True, encoding='utf8') as editor_file:
-                editoritems.Item.export(editor_file, all_items, renderables)
+                editoritems.Item.export(editor_file, all_items, renderables, id_filenames=False)
             export_screen.step('EXP', 'editoritems')
 
             LOGGER.info('Writing Editoritems database...')
@@ -907,13 +906,13 @@ class Game:
                 LOGGER.info('Writing {}...', filename)
                 loc = Path(self.abs_path(filename))
                 loc.parent.mkdir(parents=True, exist_ok=True)
-                with loc.open('wb') as f:
-                    f.write(data)
+                with loc.open('wb') as f1:
+                    f1.write(data)
 
             if self.steamID == utils.STEAM_IDS['APERTURE TAG']:
                 os.makedirs(self.abs_path('sdk_content/maps/instances/bee2/'), exist_ok=True)
-                with open(self.abs_path('sdk_content/maps/instances/bee2/tag_coop_gun.vmf'), 'w') as f:
-                    TAG_COOP_INST_VMF.export(f)
+                with open(self.abs_path('sdk_content/maps/instances/bee2/tag_coop_gun.vmf'), 'w') as f2:
+                    TAG_COOP_INST_VMF.export(f2)
 
             export_screen.reset()  # Hide loading screen, we're done
             return True, vpk_success
@@ -928,7 +927,7 @@ class Game:
         unused ones.
         """
         # If set, force them all to be present.
-        force_on = GEN_OPTS.get_bool('Debug', 'force_all_editor_models')
+        force_on = config.get_cur_conf(config.GenOptions).force_all_editor_models
 
         used_models = {
             str(mdl.with_suffix('')).casefold()
@@ -990,14 +989,14 @@ class Game:
                 )
         if fizz_colors:
             os.makedirs(self.abs_path('bee2/materials/bee2/fizz_sides/'), exist_ok=True)
-        for fizz_color, (alpha, fizz_vortex_color) in fizz_colors.items():
+        for fizz_color_vec, (alpha, fizz_vortex_color) in fizz_colors.items():
             file_path = mat_path + '{:02X}{:02X}{:02X}.vmt'.format(
-                round(fizz_color.x * 255),
-                round(fizz_color.y * 255),
-                round(fizz_color.z * 255),
+                round(fizz_color_vec.x * 255),
+                round(fizz_color_vec.y * 255),
+                round(fizz_color_vec.z * 255),
             )
             with open(file_path, 'w') as f:
-                f.write(FIZZLER_EDGE_MAT.format(Vec(fizz_color), fizz_vortex_color))
+                f.write(FIZZLER_EDGE_MAT.format(Vec(fizz_color_vec), fizz_vortex_color))
                 if alpha != 1:
                     # Add the alpha value, but replace 0.5 -> .5 to save a char.
                     f.write('$outputintensity {}\n'.format(format(alpha, 'g').replace('0.', '.')))
@@ -1218,9 +1217,10 @@ def make_tag_coop_inst(tag_loc: str):
 
     ent_count = len(vmf.entities)
 
-    def logic_pos():
+    def logic_pos() -> Iterator[Vec]:
         """Put the entities in a nice circle..."""
         while True:
+            ang: float
             for ang in range(0, ent_count):
                 ang *= 360/ent_count
                 yield Vec(16*math.sin(ang), 16*math.cos(ang), 32)

@@ -1,6 +1,6 @@
 """Build commands for VBSP and VRAD."""
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules, get_module_file_attribute
 import contextlib
 import pkgutil
 import os
@@ -12,30 +12,17 @@ SPECPATH: str
 
 # Allow importing utils.
 sys.path.append(SPECPATH)
+import utils
 
-# THe BEE2 modules cannot be imported inside the spec files.
-WIN = sys.platform.startswith('win')
-MAC = sys.platform.startswith('darwin')
-LINUX = sys.platform.startswith('linux')
-
-if MAC:
+if utils.MAC:
     suffix = '_osx'
-elif LINUX:
+elif utils.LINUX:
     suffix = '_linux'
 else:
     suffix = ''
 
-# Find the BSP transforms from HammerAddons.
-try:
-    transform_loc = Path(os.environ['BSP_TRANSFORMS']).resolve()
-except KeyError:
-    transform_loc = Path('../../HammerAddons/transforms/').resolve()
-if not transform_loc.exists():
-    raise ValueError(
-        f'Invalid BSP transforms location "{transform_loc}"!\n'
-        'Clone TeamSpen210/HammerAddons next to BEE2.4, or set the '
-        'environment variable BSP_TRANSFORMS to the location.'
-    )
+hammeraddons = Path.joinpath(Path(SPECPATH).parent, 'hammeraddons')
+sys.path.append(str(hammeraddons / 'src'))
 
 # Unneeded packages that cx_freeze detects:
 EXCLUDES = [
@@ -72,6 +59,7 @@ INCLUDES = [
     'statistics', 'string', 'struct',
 ]
 INCLUDES += collect_submodules('srctools', lambda name: 'pyinstaller' not in name and 'script' not in name)
+INCLUDES += collect_submodules('hammeraddons')
 
 # These also aren't required by logging really, but by default
 # they're imported unconditionally. Check to see if it's modified first.
@@ -81,12 +69,12 @@ import logging.config
 if not hasattr(logging.handlers, 'socket') and not hasattr(logging.config, 'socket'):
     EXCLUDES.append('socket')
     # Subprocess uses this in UNIX-style OSes, but not Windows.
-    if WIN:
+    if utils.WIN:
         EXCLUDES += ['selectors', 'select']
 
 del logging
 
-if MAC or LINUX:
+if utils.MAC or utils.LINUX:
     EXCLUDES += ['grp', 'pwd']  # Unix authentication modules, optional
 
     # The only hash algorithm that's used is sha512 - random.seed()
@@ -103,10 +91,24 @@ INCLUDES += [
     pkgutil.iter_modules(['precomp/conditions'])
 ]
 
+# Find and add libspatialindex DLLs.
+if utils.WIN and utils.BITNESS == '32':
+    # On 32-bit windows, we have to manually copy our versions -
+    # there's no wheel including them by default.
+    binaries = []
+    lib_path = Path(SPECPATH, '..', 'lib-32').absolute()
+    rtree_dir = Path(get_module_file_attribute('rtree'), '../lib').absolute()
+    rtree_dir.mkdir(exist_ok=True)
+    for dll in lib_path.iterdir():
+        if dll.suffix == '.dll' and 'spatialindex' in dll.stem:
+            dest = rtree_dir / dll.name
+            print('Writing {} -> {}', dll, dest)
+            dest.write_bytes(dll.read_bytes())
+# Now we can collect the appropriate path.
+binaries = collect_dynamic_libs('rtree')
 
 # Write this to the temp folder, so it's picked up and included.
 # Don't write it out though if it's the same, so PyInstaller doesn't reparse.
-import utils
 version_val = 'BEE_VERSION=' + repr(utils.get_git_version(SPECPATH))
 print(version_val)
 version_filename = os.path.join(workpath, '_compiled_version.py')
@@ -125,15 +127,16 @@ from PyInstaller.building.build_main import Analysis, PYZ, EXE, COLLECT
 vbsp_vrad_an = Analysis(
     ['compiler_launch.py'],
     pathex=[workpath],
-    binaries=[],
+    binaries=binaries,
     hiddenimports=INCLUDES,
     excludes=EXCLUDES,
-    noarchive=False
+    noarchive=False,
 )
 
 # Force the BSP transforms to be included in their own location.
 # Map package -> module.
 names: 'dict[str, list[str]]' = {}
+transform_loc = hammeraddons / 'transforms'
 for mod in transform_loc.rglob('*.py'):
     rel_path = mod.relative_to(transform_loc)
 

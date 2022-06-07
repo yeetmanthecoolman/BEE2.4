@@ -4,23 +4,23 @@ from __future__ import annotations
 import itertools
 import os
 from collections import defaultdict
-from typing import Union, Optional, Tuple, Mapping, Iterable, Iterator
+from typing import Callable, Union, Optional, Tuple, Mapping, Iterable, Iterator
 
 from decimal import Decimal
 from enum import Enum
 from operator import attrgetter
-import attr
 
+import attrs
 from srctools import Property
 from srctools.filesys import FileSystem, ZipFileSystem, RawFileSystem, VPKFileSystem
 from srctools.math import Vec, Angle, Matrix, to_matrix
-from srctools.vmf import EntityFixup, Entity, Solid, Side, VMF, UVAxis
-from srctools.dmx import Element as DMElement, ValueType as DMType
+from srctools.vmf import EntityFixup, Entity, EntityGroup, Solid, Side, VMF, UVAxis, VisGroup
+from srctools.dmx import Element as DMElement
 import srctools.logger
 
 from .texturing import Portalable, GenCat, TileSize
 from .tiling import TileType
-from . import tiling, texturing, options, rand
+from . import tiling, texturing, options, rand, collisions
 import consts
 
 
@@ -66,7 +66,7 @@ class AfterPickMode(Enum):
     NODRAW = '2'  # Convert to nodraw.
 
 
-@attr.define
+@attrs.define
 class UnparsedTemplate:
     """Holds the location of a template that hasn't been parsed yet."""
     id: str
@@ -74,17 +74,17 @@ class UnparsedTemplate:
     path: str
 
 
-@attr.define
+@attrs.define
 class TemplateEntity:
     """One of the several entities defined in templates."""
-    offset: Vec
-    normal: Vec  # Normal of the surface.
     visgroups: set[str]  # Visgroups applied to this entity.
 
 
-@attr.define
+@attrs.define
 class ColorPicker(TemplateEntity):
     """Color pickers allow applying the existing colors onto faces."""
+    offset: Vec
+    normal: Vec  # Normal of the surface.
     priority: Decimal  # Decimal order to do them in.
     name: str  # Name to reference from other ents.
     sides: list[str]
@@ -99,22 +99,32 @@ class ColorPicker(TemplateEntity):
     force_tex_black: str
 
 
-@attr.define
+@attrs.define
 class VoxelSetter(TemplateEntity):
     """Set all tiles in a tiledef."""
+    offset: Vec
+    normal: Vec  # Normal of the surface.
     tile_type: TileType  # Type to produce.
     force: bool  # Force overwrite existing values.
 
 
-@attr.define
+@attrs.define
 class TileSetter(VoxelSetter):
     """Set tiles in a particular position."""
     color: Union[Portalable, str, None]  # Portalable value, 'INVERT' or None
     picker_name: str  # Name of colorpicker to use for the color.
 
+
+@attrs.define
+class CollisionDef(TemplateEntity):
+    """Adds a bounding box to the map."""
+    bbox: collisions.BBox
+    visgroups: set[str]  # Visgroups required to add this.
+
+
 # We use the skins value on the tilesetter to specify type, allowing visualising it.
 # So this is the type for each index.
-TILE_SETTER_SKINS = [
+SKIN_TO_TILETYPE = [
     TileType.BLACK,
     TileType.BLACK_4x4,
     TileType.WHITE,
@@ -124,7 +134,10 @@ TILE_SETTER_SKINS = [
     TileType.CUTOUT_TILE_BROKEN,
     TileType.CUTOUT_TILE_PARTIAL,
 ]
-
+TILETYPE_TO_SKIN = {
+    tile_type: skin
+    for skin, tile_type in enumerate(SKIN_TO_TILETYPE)
+}
 
 B = Portalable.BLACK
 W = Portalable.WHITE
@@ -190,7 +203,7 @@ TEMP_COLOUR_INVERT = {
 }
 
 
-@attr.define(frozen=True)
+@attrs.define(frozen=True)
 class ExportedTemplate:
     """The result of importing a template.
 
@@ -210,6 +223,7 @@ class ExportedTemplate:
     visgroups: set[str]
     picker_results: dict[str, Optional[Portalable]]
     picker_type_results: dict[str, Optional[TileType]]
+    debug_marker: Optional[Callable[..., None]]
 
 
 # Make_prism() generates faces aligned to world, copy the required UVs.
@@ -225,7 +239,7 @@ class Template:
     """Represents a template before it's imported into a map."""
     _data: dict[str, tuple[list[Solid], list[Solid], list[Entity]]]
     def __init__(
-        self,
+        self, *,
         temp_id: str,
         visgroup_names: set[str],
         world: dict[str, list[Solid]],
@@ -238,16 +252,19 @@ class Template:
         color_pickers: Iterable[ColorPicker]=(),
         tile_setters: Iterable[TileSetter]=(),
         voxel_setters: Iterable[VoxelSetter]=(),
+        coll: Iterable[CollisionDef]=(),
+        debug: bool = False,
     ) -> None:
         self.id = temp_id
         self._data = {}
+        self.debug = debug  # When true, dump info to the map when placed.
 
         # We ensure the '' group is always present.
         visgroup_names.add('')
         visgroup_names.update(world)
         visgroup_names.update(detail)
         visgroup_names.update(overlays)
-        for ent in itertools.chain(color_pickers, tile_setters, voxel_setters):
+        for ent in itertools.chain(color_pickers, tile_setters, voxel_setters, coll):
             visgroup_names.update(ent.visgroups)
 
         for group in visgroup_names:
@@ -269,6 +286,7 @@ class Template:
         )
         self.tile_setters = list(tile_setters)
         self.voxel_setters = list(voxel_setters)
+        self.collisions = list(coll)
 
     def __repr__(self) -> str:
         return (
@@ -283,7 +301,7 @@ class Template:
 
     def visgrouped(
         self,
-        visgroups: Union[str, Iterable[str]]=(),
+        visgroups: str | Iterable[str]=(),
     ) -> tuple[list[Solid], list[Solid], list[Entity]]:
         """Given some visgroups, return the matching data.
 
@@ -291,16 +309,15 @@ class Template:
         visgroups can also be a single string, to select that.
         """
         if isinstance(visgroups, str):
-            visgroups = {'', visgroups}
+            chosen = {visgroups, ''}
         else:
-            visgroups = set(visgroups)
-            visgroups.add('')
+            chosen = {*visgroups, ''}
 
         world_brushes: list[Solid] = []
         detail_brushes: list[Solid] = []
         overlays: list[Entity] = []
 
-        for group in visgroups:
+        for group in chosen:
             try:
                 world, detail, over = self._data[group.casefold()]
             except KeyError:
@@ -314,6 +331,14 @@ class Template:
 
         return world_brushes, detail_brushes, overlays
 
+    def visgrouped_solids(self, visgroups: str | Iterable[str]=()) -> list[Solid]:
+        """Given some visgroups, return the matching brushes.
+
+        This ignores the world/detail brush distinction.
+        """
+        world, detail, _ = self.visgrouped(visgroups)
+        return world + detail
+
 
 class ScalingTemplate(Mapping[
     Union[Vec, Tuple[float, float, float]],
@@ -323,7 +348,7 @@ class ScalingTemplate(Mapping[
 
     The template is a single world-aligned cube brush, with the 6 sides used
     to determine orientation and materials for some texture set.
-    It's stored in an ent so we don't need all the data. Values are returned
+    It's stored in an ent, so we don't need all the data. Values are returned
     as (material, U, V, rotation) tuples.
     """
 
@@ -402,12 +427,11 @@ def parse_temp_name(name) -> tuple[str, set[str]]:
     """Parse the visgroups off the end of an ID."""
     if ':' in name:
         temp_name, visgroups = name.rsplit(':', 1)
-        return temp_name.casefold(), {
-            vis.strip().casefold()
-            for vis in
-            visgroups.split(',')
-            if not vis.isspace()
-        }
+        return temp_name.casefold(), set(
+            # Parse comma-seperated visgroups, remove empty, and casefold.
+            map(str.casefold, map(str.strip,
+                itertools.filterfalse(str.isspace, visgroups.split(','))
+        )))
     else:
         return name.casefold(), set()
 
@@ -418,11 +442,9 @@ def load_templates(path: str) -> None:
         dmx, fmt_name, fmt_ver = DMElement.parse(f, unicode=True)
     if fmt_name != 'bee_templates' or fmt_ver not in [1]:
         raise ValueError(f'Invalid template file format "{fmt_name}" v{fmt_ver}')
-    temp_list = dmx['temp']
-    if temp_list.type is not DMType.ELEMENT:
-        raise ValueError('Badd template array type ' + temp_list.type.name)
-    for template in dmx['temp']:
-        assert isinstance(template, DMElement), template
+    for template in dmx['temp'].iter_elem():
+        if template is None:
+            raise ValueError('Null template!')
         _TEMPLATES[template.name.casefold()] = UnparsedTemplate(
             template.name.upper(),
             template['package'].val_str,
@@ -568,7 +590,7 @@ def _parse_template(loc: UnparsedTemplate) -> Template:
         ))
 
     for ent in vmf.by_class['bee2_template_voxelsetter']:
-        tile_type = TILE_SETTER_SKINS[srctools.conv_int(ent['skin'])]
+        tile_type = SKIN_TO_TILETYPE[srctools.conv_int(ent['skin'])]
 
         voxel_setters.append(VoxelSetter(
             offset=Vec.from_str(ent['origin']),
@@ -579,7 +601,7 @@ def _parse_template(loc: UnparsedTemplate) -> Template:
         ))
 
     for ent in vmf.by_class['bee2_template_tilesetter']:
-        tile_type = TILE_SETTER_SKINS[srctools.conv_int(ent['skin'])]
+        tile_type = SKIN_TO_TILETYPE[srctools.conv_int(ent['skin'])]
         color = ent['color']
         if color == 'tile':
             try:
@@ -605,19 +627,27 @@ def _parse_template(loc: UnparsedTemplate) -> Template:
             force=srctools.conv_bool(ent['force']),
         ))
 
+    coll: list[CollisionDef] = []
+    for ent in vmf.by_class['bee2_collision_bbox']:
+        visgroups = set(map(visgroup_names.__getitem__, ent.visgroup_ids))
+        for bbox in collisions.BBox.from_ent(ent):
+            coll.append(CollisionDef(bbox, visgroups))
+
     return Template(
-        loc.id,
-        set(visgroup_names.values()),
-        world_ents,
-        detail_ents,
-        overlay_ents,
-        conf['skip_faces'].split(),
-        conf['realign_faces'].split(),
-        conf['overlay_faces'].split(),
-        conf['vertical_faces'].split(),
-        color_pickers,
-        tile_setters,
-        voxel_setters,
+        temp_id=loc.id,
+        visgroup_names=set(visgroup_names.values()),
+        world=world_ents,
+        detail=detail_ents,
+        overlays=overlay_ents,
+        skip_faces=conf['skip_faces'].split(),
+        realign_faces=conf['realign_faces'].split(),
+        overlay_transfer_faces=conf['overlay_faces'].split(),
+        vertical_faces=conf['vertical_faces'].split(),
+        color_pickers=color_pickers,
+        tile_setters=tile_setters,
+        voxel_setters=voxel_setters,
+        coll=coll,
+        debug=srctools.conv_bool(conf['debug']),
     )
 
 
@@ -631,6 +661,8 @@ def get_template(temp_name: str) -> Template:
     if isinstance(temp, UnparsedTemplate):
         LOGGER.debug('Parsing template {}', temp_name.upper())
         temp = _TEMPLATES[temp_name.casefold()] = _parse_template(temp)
+        if temp.debug:
+            LOGGER.info('Template {} in debug mode.', temp_name.upper())
 
     return temp
 
@@ -646,23 +678,28 @@ def import_template(
     additional_visgroups: Iterable[str]=(),
     bind_tile_pos: Iterable[Vec]=(),
     align_bind: bool=False,
+    coll: collisions.Collisions=None,
+    coll_add: Optional[collisions.CollideType] = collisions.CollideType.NOTHING,
+    coll_mask: collisions.CollideType = collisions.CollideType.EVERYTHING,
 ) -> ExportedTemplate:
     """Import the given template at a location.
 
-    temp_name can be a string, or a template instance. visgroups is a list
-    of additional visgroups to use after the ones in the name string (if given).
-
-    If force_type is set to 'detail' or 'world', all brushes will be converted
-    to the specified type instead. A list of world brushes and the func_detail
-    entity will be returned. If there are no detail brushes, None will be
-    returned instead of an invalid entity.
-
-    If targetname is set, it will be used to localise overlay names.
-    add_to_map sets whether to add the brushes and func_detail to the map.
-
-    If any bound_tile_pos are provided, these are offsets to tiledefs which
-    should have all the overlays in this template bound to them, and vice versa.
-    If align_bind is set, these will be first aligned to grid.
+    * `temp_name` can be a string, or a template instance.
+    * `visgroups` is a list of additional visgroups to use after the ones in the name string (if given).
+    * If `force_type` is set to 'detail' or 'world', all brushes will be converted
+      to the specified type instead. A list of world brushes and the func_detail
+      entity will be returned. If there are no detail brushes, None will be
+      returned instead of an invalid entity.
+    * If `targetname` is set, it will be used to localise overlay names.
+      add_to_map sets whether to add the brushes and func_detail to the map.
+    * IF `coll` is provided, the template may have bee2_collision volumes. The targetname must be
+      provided in this case.
+    * If any `bound_tile_pos` are provided, these are offsets to tiledefs which
+      should have all the overlays in this template bound to them, and vice versa.
+    * If `align_bind` is set, these will be first aligned to grid.
+    * `coll_mask` and `coll_force` allow modifying the collision types added. `coll_mask` is AND-ed
+      with the bbox type, then `coll_add` is OR-ed in. If the collide type ends up being NOTHING, it
+      is skipped.
     """
     import vbsp
     if isinstance(temp_name, Template):
@@ -684,6 +721,33 @@ def import_template(
     # A map of the original -> new face IDs.
     id_mapping: dict[int, int] = {}
     orient = to_matrix(angles)
+
+    dbg_visgroup: Optional[VisGroup] = None
+    dbg_group: Optional[EntityGroup] = None
+    dbg_add: Optional[Callable[..., None]] = None
+    if template.debug:
+        # Find the visgroup for template debug data, and create an entity group.
+        for dbg_visgroup in vmf.vis_tree:
+            if dbg_visgroup.name == 'Templates':
+                break
+        else:
+            dbg_visgroup = vmf.create_visgroup('Templates', (113, 113, 0))
+        dbg_group = EntityGroup(vmf, color=(113, 113, 0))
+
+        def dbg_add(classname, **kwargs) -> None:
+            """Add a marker to the map."""
+            ent = vmf.create_ent(classname, **kwargs)
+            ent.visgroup_ids.add(dbg_visgroup.id)
+            ent.groups.add(dbg_group.id)
+            ent.vis_shown = False
+
+        dbg_add(
+            'bee2_template_conf',
+            template_id=template.id,
+            origin=origin,
+            angles=orient.to_angle(),
+            visgroups=' '.join(chosen_groups - {''})
+        )
 
     for orig_list, new_list in [
         (orig_world, new_world),
@@ -726,6 +790,8 @@ def import_template(
 
         # Don't let the overlays get retextured too!
         vbsp.IGNORED_OVERLAYS.add(new_overlay)
+        if dbg_visgroup is not None and dbg_group is not None:
+            overlay.groups.add(dbg_group.id)
 
     if force_type is TEMP_TYPES.detail:
         new_detail.extend(new_world)
@@ -744,12 +810,22 @@ def import_template(
         detail_ent.solids = new_detail
         if not add_to_map:
             detail_ent.remove()
+        if dbg_visgroup is not None and dbg_group is not None:
+            detail_ent.groups.add(dbg_group.id)
+
+    # Only world brushes.
+    if dbg_visgroup is not None and dbg_group is not None:
+        for brush in new_world:
+            brush.group_id = dbg_group.id
 
     if bind_tile_pos:
         # Bind all our overlays without IDs to a set of tiles,
         # and add any marked faces to those tiles to be given overlays.
-        new_overlay_faces = set(map(id_mapping.get, map(int, template.overlay_faces)))
-        new_overlay_faces.discard(None)
+        new_overlay_faces = {
+            id_mapping[old_id]
+            for str_id in template.overlay_faces
+            if (old_id := int(str_id)) in id_mapping
+        }
         bound_overlay_faces = [
             face
             for brush in (new_world + new_detail)
@@ -779,6 +855,28 @@ def import_template(
                     tile.bind_overlay(over)
             tile.brush_faces.extend(bound_overlay_faces)
 
+            if dbg_add is not None:
+                dbg_add(
+                    'info_target',
+                    targetname='bound_tiles',
+                    origin=tile_off,
+                    faces=' '.join(map(str, new_overlay_faces)),
+                )
+
+    if template.collisions:
+        if coll is None:
+            LOGGER.warning('Template "{}" has collisions, but unable to apply these!', template.id)
+        elif targetname:
+            for coll_def in template.collisions:
+                if not coll_def.visgroups.issubset(chosen_groups):
+                    continue
+                contents = (coll_def.bbox.contents & coll_mask) | coll_add
+                if contents is not contents.NOTHING:
+                    bbox = coll_def.bbox @ orient + origin
+                    coll.add(bbox.with_attrs(name=targetname, contents=contents))
+        else:
+            LOGGER.warning('With collisions provided, the instance name must not be blank!')
+
     return ExportedTemplate(
         world=new_world,
         detail=detail_ent,
@@ -790,6 +888,7 @@ def import_template(
         visgroups=chosen_groups,
         picker_results={},  # Filled by retexture_template.
         picker_type_results={},
+        debug_marker=dbg_add,
     )
 
 
@@ -806,15 +905,9 @@ def get_scaling_template(temp_id: str) -> ScalingTemplate:
     except KeyError:
         pass
     temp = get_template(temp_name)
-
-    world, detail, over = temp.visgrouped(over_names)
-
-    if detail:
-        world += detail
-
     uvs = {}
 
-    for brush in world:
+    for brush in temp.visgrouped_solids(over_names):
         for side in brush.sides:
             uvs[side.normal().as_tuple()] = (
                 side.mat,
@@ -919,10 +1012,10 @@ def retexture_template(
         if not color_picker.visgroups.issubset(template_data.visgroups):
             continue
 
-        picker_pos = round(
+        picker_pos: Vec = round(
             color_picker.offset @ template_data.orient
             + template_data.origin + sense_offset, 6)
-        picker_norm = round(color_picker.normal @ template_data.orient, 6)
+        picker_norm: Vec = round(color_picker.normal @ template_data.orient, 6)
 
         if color_picker.grid_snap:
             for axis in 'xyz':
@@ -930,6 +1023,19 @@ def retexture_template(
                 # those are already fine.
                 if abs(picker_norm[axis]) < 0.01:
                     picker_pos[axis] = picker_pos[axis] // 128 * 128 + 64
+
+        if template_data.debug_marker is not None:
+            template_data.debug_marker(
+                'bee2_template_colorpicker',
+                targetname=color_picker.name,
+                origin=picker_pos,
+                angles=picker_norm.to_angle(),
+                faces=' '.join([
+                    str(side.id)
+                    for old_id in color_picker.sides
+                    if (side := picker_patterned[old_id]) is not None
+                ]),
+            )
 
         try:
             tiledef, u, v = tiling.find_tile(picker_pos, picker_norm)
@@ -999,6 +1105,16 @@ def retexture_template(
             + template_data.origin + sense_offset, 6)
         setter_norm = round(voxel_setter.normal @ template_data.orient, 6)
 
+        if template_data.debug_marker is not None:
+            template_data.debug_marker(
+                'bee2_template_voxelsetter',
+                origin=setter_pos,
+                # X -> Z correction.
+                angles=Angle(0, 90, 90) @ setter_norm.to_angle(),
+                skin=TILETYPE_TO_SKIN[voxel_setter.tile_type],
+                force=voxel_setter.force,
+            )
+
         norm_axis = setter_norm.axis()
         u_axis, v_axis = Vec.INV_AXIS[norm_axis]
         offsets = (-48, -16, 16, 48)
@@ -1022,6 +1138,17 @@ def retexture_template(
         setter_norm = round(tile_setter.normal @ template_data.orient, 6)
 
         setter_type: TileType = tile_setter.tile_type
+
+        if template_data.debug_marker is not None:
+            template_data.debug_marker(
+                'bee2_template_tilesetter',
+                origin=setter_pos,
+                # X -> Z correction.
+                angles=Angle(0, 90, 90) @ setter_norm.to_angle(),
+                skin=TILETYPE_TO_SKIN[setter_type],
+                force=tile_setter.force,
+                picker_name=tile_setter.picker_name,
+            )
 
         if tile_setter.color == 'copy':
             if not tile_setter.picker_name:

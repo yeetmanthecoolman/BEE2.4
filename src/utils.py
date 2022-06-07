@@ -1,22 +1,21 @@
 """Various functions shared among the compiler and application."""
 from __future__ import annotations
 from collections import deque
+import copyreg
 from typing import (
-    TypeVar, Any, NoReturn, Generic, Type,
-    SupportsInt, Union, Callable,
-    Sequence, Iterator, Iterable, Mapping,
-    KeysView, ValuesView, ItemsView, Generator,
+    TypeVar, Any, NoReturn, Generic, Optional, TYPE_CHECKING,
+    SupportsInt, Callable, Sequence, Iterator, Iterable, Mapping, Generator, Type,
+    KeysView, ValuesView, ItemsView,
 )
 import logging
 import os
 import stat
 import shutil
-import copyreg
+import types
 import sys
 import zipfile
 from pathlib import Path
 from enum import Enum
-from types import TracebackType
 
 from srctools import Angle
 
@@ -62,6 +61,7 @@ copyreg.add_extension('srctools.property_parser', 'Property', 244)
 
 
 # Appropriate locations to store config options for each OS.
+_SETTINGS_ROOT: Optional[Path]
 if WIN:
     _SETTINGS_ROOT = Path(os.environ['APPDATA'])
 elif MAC:
@@ -71,10 +71,10 @@ elif LINUX:
 else:
     # Defer the error until used, so it goes in logs and whatnot.
     # Utils is early, so it'll get lost in stderr.
-    _SETTINGS_ROOT = None  # type: ignore
+    _SETTINGS_ROOT = None
 
 # We always go in a BEE2 subfolder
-if _SETTINGS_ROOT:
+if _SETTINGS_ROOT is not None:
     _SETTINGS_ROOT /= 'BEEMOD2'
 
 
@@ -100,8 +100,8 @@ try:
     from _compiled_version import BEE_VERSION  # type: ignore
 except ImportError:
     # We're running from src/, so data is in the folder above that.
-    # Go up once from the file to its containing folder, then to the parent.
-    _INSTALL_ROOT = Path(sys.argv[0]).resolve().parent.parent
+    # Go up once from us to its containing folder, then to the parent.
+    _INSTALL_ROOT = Path(__file__).resolve().parent.parent
 
     BEE_VERSION = get_git_version(_INSTALL_ROOT)
     FROZEN = False
@@ -115,6 +115,7 @@ else:
 
 BITNESS = '64' if sys.maxsize > (2 << 48) else '32'
 BEE_VERSION += f' {BITNESS}-bit'
+
 
 def install_path(path: str) -> Path:
     """Return the path to a file inside our installation folder."""
@@ -145,20 +146,23 @@ def conf_location(path: str) -> Path:
 def fix_cur_directory() -> None:
     """Change directory to the location of the executable.
 
-    Otherwise we can't find our files!
+    Otherwise, we can't find our files!
     """
     os.chdir(os.path.abspath(os.path.dirname(sys.argv[0])))
 
 
-def _run_bg_daemon(*args) -> None:
-    """Helper to make loadScreen not need to import bg_daemon.
+if TYPE_CHECKING:
+    from bg_daemon import run_background as run_bg_daemon
+else:
+    def run_bg_daemon(*args) -> None:
+        """Helper to make loadScreen not need to import bg_daemon.
 
-    Instead we can redirect the import through here, which is a module
-    both processes need to import. Then the main process doesn't need
-    to import bg_daemon, and the daemon doesn't need to import loadScreen.
-    """
-    import bg_daemon
-    bg_daemon.run_background(*args)
+        Instead, we can redirect the import through here, which is a module
+        both processes need to import. Then the main process doesn't need
+        to import bg_daemon, and the daemon doesn't need to import loadScreen.
+        """
+        import bg_daemon
+        bg_daemon.run_background(*args)
 
 
 class CONN_TYPES(Enum):
@@ -206,12 +210,12 @@ CONN_LOOKUP = {
 del N, S, E, W
 
 RetT = TypeVar('RetT')
-FuncT = TypeVar('FuncT', bound=Callable)
+LookupT = TypeVar('LookupT')
 EnumT = TypeVar('EnumT', bound=Enum)
 
 
 def freeze_enum_props(cls: Type[EnumT]) -> Type[EnumT]:
-    """Make a enum with property getters more efficent.
+    """Make an enum with property getters more efficent.
 
     Call the getter on each member, and then replace it with a dict lookup.
     """
@@ -220,14 +224,15 @@ def freeze_enum_props(cls: Type[EnumT]) -> Type[EnumT]:
         if not isinstance(value, property) or value.fset is not None or value.fdel is not None:
             continue
         data = {}
-        data_exc = {}
+        data_exc: dict[EnumT, tuple[BaseException, types.TracebackType | None]] = {}
 
         exc: Exception
         enum: EnumT
+        tb: types.TracebackType | None
         for enum in cls:
             # Put the class into the globals, so it can refer to itself.
             try:
-                value.fget.__globals__[cls.__name__] = cls  # type: ignore
+                value.fget.__globals__[cls.__name__] = cls
             except AttributeError:
                 pass
             try:
@@ -235,9 +240,15 @@ def freeze_enum_props(cls: Type[EnumT]) -> Type[EnumT]:
             except Exception as exc:
                 # The getter raised an exception, so we want to replicate
                 # that. So grab the traceback, and go back one frame to exclude
-                # ourselves from that. Then we can reraise making it look like
+                # ourselves from that. Then we can re-raise making it look like
                 # it came from the original getter.
-                data_exc[enum] = (exc, exc.__traceback__.tb_next)
+                if exc.__traceback__ is not None:
+                    tb = exc.__traceback__
+                    if tb.tb_next is not None:
+                        tb = tb.tb_next
+                else:
+                    tb = None
+                data_exc[enum] = (exc, tb)
                 exc.__traceback__ = None
             else:
                 data[enum] = res
@@ -251,7 +262,7 @@ def freeze_enum_props(cls: Type[EnumT]) -> Type[EnumT]:
 
 def _exc_freeze(
     data: Mapping[EnumT, RetT],
-    data_exc: Mapping[EnumT, tuple[BaseException, TracebackType]],
+    data_exc: Mapping[EnumT, tuple[BaseException, types.TracebackType | None]],
 ) -> Callable[[EnumT], RetT]:
     """If the property raises exceptions, we need to reraise them."""
     def getter(value: EnumT) -> RetT:
@@ -278,7 +289,7 @@ if hasattr(zipfile, '_SharedFile'):
     zipfile._SharedFile = _SharedZipFile  # type: ignore
 
 
-class FuncLookup(Generic[FuncT], Mapping[str, FuncT]):
+class FuncLookup(Generic[LookupT], Mapping[str, LookupT]):
     """A dict for holding callback functions.
 
     Functions are added by using this as a decorator. Positional arguments
@@ -296,10 +307,10 @@ class FuncLookup(Generic[FuncT], Mapping[str, FuncT]):
     ) -> None:
         self.casefold = casefold
         self.__name__ = name
-        self._registry: dict[str, FuncT] = {}
+        self._registry: dict[str, LookupT] = {}
         self.allowed_attrs = set(attrs)
 
-    def __call__(self, *names: str, **kwargs) -> Callable[[FuncT], FuncT]:
+    def __call__(self, *names: str, **kwargs: Any) -> Callable[[LookupT], LookupT]:
         """Add a function to the dict."""
         if not names:
             raise TypeError('No names passed!')
@@ -311,10 +322,11 @@ class FuncLookup(Generic[FuncT], Mapping[str, FuncT]):
                 f'Allowed: {", ".join(self.allowed_attrs)}'
             )
 
-        def callback(func: FuncT) -> FuncT:
+        def callback(func: LookupT) -> LookupT:
             """Decorator to do the work of adding the function."""
             # Set the name to <dict['name']>
-            func.__name__ = '<{}[{!r}]>'.format(self.__name__, names[0])
+            if isinstance(func, types.FunctionType):
+                func.__name__ = '<{}[{!r}]>'.format(self.__name__, names[0])
             for name, value in kwargs.items():
                 setattr(func, name, value)
             self.__setitem__(names, func)
@@ -331,28 +343,28 @@ class FuncLookup(Generic[FuncT], Mapping[str, FuncT]):
             return NotImplemented
         return self._registry == conv
 
-    def __iter__(self) -> Iterator[FuncT]:
-        """Yield all the functions."""
-        return iter(self.values())
+    def __iter__(self) -> Iterator[str]:
+        """Yield all the IDs."""
+        return iter(self._registry)
 
     def keys(self) -> KeysView[str]:
         """Yield all the valid IDs."""
         return self._registry.keys()
 
-    def values(self) -> ValuesView[FuncT]:
+    def values(self) -> ValuesView[LookupT]:
         """Yield all the functions."""
         return self._registry.values()
 
-    def items(self) -> ItemsView[str, FuncT]:
+    def items(self) -> ItemsView[str, LookupT]:
         """Return pairs of (ID, func)."""
         return self._registry.items()
 
     def __len__(self) -> int:
         return len(set(self._registry.values()))
 
-    def __getitem__(self, names: Union[str, tuple[str]]) -> FuncT:
+    def __getitem__(self, names: str | tuple[str, ...]) -> LookupT:
         if isinstance(names, str):
-            names = names,
+            names = (names, )
 
         for name in names:
             if self.casefold:
@@ -362,23 +374,21 @@ class FuncLookup(Generic[FuncT], Mapping[str, FuncT]):
             except KeyError:
                 pass
         else:
-            raise KeyError('No function with names {}!'.format(
-                ', '.join(names),
-            ))
+            raise KeyError(f'No function with names {", ".join(names)}!')
 
     def __setitem__(
         self,
-        names: Union[str, tuple[str, ...]],
-        func: FuncT,
+        names: str | tuple[str, ...],
+        func: LookupT,
     ) -> None:
         if isinstance(names, str):
-            names = names,
+            names = (names, )
 
         for name in names:
             if self.casefold:
                 name = name.casefold()
             if name in self._registry:
-                raise ValueError('Overwrote {!r}!'.format(name))
+                raise ValueError(f'Overwrote {name!r}!')
             self._registry[name] = func
 
     def __delitem__(self, name: str) -> None:
@@ -395,7 +405,7 @@ class FuncLookup(Generic[FuncT], Mapping[str, FuncT]):
             name = name.casefold()
         return name in self._registry
 
-    def functions(self) -> set[FuncT]:
+    def functions(self) -> set[LookupT]:
         """Return the set of functions in this mapping."""
         return set(self._registry.values())
 
@@ -435,7 +445,7 @@ class PackagePath:
     def __hash__(self) -> int:
         return hash((self.package, self.path))
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, str):
             other = self.parse(other, self.package)
         elif not isinstance(other, PackagePath):
@@ -497,7 +507,7 @@ if WIN:
         import ctypes
         # https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
         GetAsyncKeyState = ctypes.windll.User32.GetAsyncKeyState
-        GetAsyncKeyState.returntype = ctypes.c_short
+        GetAsyncKeyState.restype = ctypes.c_short
         GetAsyncKeyState.argtypes = [ctypes.c_int]
         VK_SHIFT = 0x10
         # Most significant bit set if currently held.
@@ -507,51 +517,6 @@ else:
         """Check if Shift is currently held."""
         return False
     print('Need implementation of utils.check_shift()!')
-
-
-DISABLE_ADJUST = False
-
-
-def adjust_inside_screen(
-    x: int,
-    y: int,
-    win,
-    horiz_bound: int=14,
-    vert_bound: int=45,
-) -> tuple[int, int]:
-    """Adjust a window position to ensure it fits inside the screen.
-
-    The new value is returned.
-    If utils.DISABLE_ADJUST is set to True, this is disabled.
-    """
-    if DISABLE_ADJUST:  # Allow disabling this adjustment
-        return x, y     # for multi-window setups
-    max_x = win.winfo_screenwidth() - win.winfo_width() - horiz_bound
-    max_y = win.winfo_screenheight() - win.winfo_height() - vert_bound
-
-    if x < horiz_bound:
-        x = horiz_bound
-    elif x > max_x:
-        x = max_x
-
-    if y < vert_bound:
-        y = vert_bound
-    elif y > max_y:
-        y = max_y
-    return x, y
-
-
-def center_win(window, parent=None) -> None:
-    """Center a subwindow to be inside a parent window."""
-    if parent is None:
-        parent = window.nametowidget(window.winfo_parent())
-
-    x = parent.winfo_rootx() + (parent.winfo_width()-window.winfo_width())//2
-    y = parent.winfo_rooty() + (parent.winfo_height()-window.winfo_height())//2
-
-    x, y = adjust_inside_screen(x, y, window)
-
-    window.geometry('+' + str(x) + '+' + str(y))
 
 
 def _append_bothsides(deq: deque) -> Generator[None, Any, None]:
@@ -636,12 +601,12 @@ def restart_app() -> NoReturn:
     os.execv(sys.executable, args)
 
 
-def quit_app(status=0) -> NoReturn:
+def quit_app(status: int=0) -> NoReturn:
     """Quit the application."""
     sys.exit(status)
 
 
-def set_readonly(file: Union[bytes, str]) -> None:
+def set_readonly(file: str | bytes | os.PathLike) -> None:
     """Make the given file read-only."""
     # Get the old flags
     flags = os.stat(file).st_mode
@@ -655,7 +620,7 @@ def set_readonly(file: Union[bytes, str]) -> None:
     )
 
 
-def unset_readonly(file: os.PathLike) -> None:
+def unset_readonly(file: str | bytes | os.PathLike) -> None:
     """Set the writeable flag on a file."""
     # Get the old flags
     flags = os.stat(file).st_mode
@@ -672,7 +637,7 @@ def unset_readonly(file: os.PathLike) -> None:
 def merge_tree(
     src: str,
     dst: str,
-    copy_function=shutil.copy2,
+    copy_function: Callable[[str, str], None]=shutil.copy2,
 ) -> None:
     """Recursively copy a directory tree to a destination, which may exist.
 

@@ -1,17 +1,20 @@
 """Handles the UI required for saving and loading palettes."""
 from __future__ import annotations
-from typing import Callable
+from typing import Awaitable, Callable
 from uuid import UUID
 
-import tkinter as tk
+from srctools.dmx import Element
 from tkinter import ttk, messagebox
+import tkinter as tk
 
-import BEE2_config
+from srctools import Property
+import srctools.logger
+import attrs
+
 from app.paletteLoader import Palette, UUID_PORTAL2, UUID_EXPORT, UUID_BLANK
-from app import tk_tools, paletteLoader, TK_ROOT, img
+from app import background_run, tk_tools, paletteLoader, config, TK_ROOT, img, BEE2
 from localisation import gettext
 
-import srctools.logger
 
 LOGGER = srctools.logger.get_logger(__name__)
 TREE_TAG_GROUPS = 'pal_group'
@@ -24,6 +27,67 @@ __all__ = [
 ]
 
 
+@config.register('Palette', palette_stores=False)
+@attrs.frozen
+class PaletteState(config.Data):
+    """Data related to palettes which is restored next run.
+
+    Since we don't store in the palette, we don't need to register the UI callback.
+    """
+    selected: UUID = UUID_PORTAL2
+    save_settings: bool = False
+
+    @classmethod
+    def parse_legacy(cls, conf: Property) -> dict[str, PaletteState]:
+        """Convert the legacy config options to the new format."""
+        # These are all in the GEN_OPTS config.
+        try:
+            selected_uuid = UUID(hex=config.LEGACY_CONF.get_val('Last_Selected', 'palette_uuid', ''))
+        except ValueError:
+            selected_uuid = UUID_PORTAL2
+
+        return {'': cls(
+            selected_uuid,
+            config.LEGACY_CONF.get_bool('General', 'palette_save_settings'),
+        )}
+
+    @classmethod
+    def parse_kv1(cls, data: Property, version: int) -> PaletteState:
+        """Parse Keyvalues data."""
+        assert version == 1
+        try:
+            uuid = UUID(hex=data['selected'])
+        except (LookupError, ValueError):
+            uuid = UUID_PORTAL2
+        return PaletteState(uuid, data.bool('save_settings', False))
+
+    def export_kv1(self) -> Property:
+        """Export to a property block."""
+        return Property('', [
+            Property('selected', self.selected.hex),
+            Property('save_settings', srctools.bool_as_int(self.save_settings)),
+        ])
+
+    @classmethod
+    def parse_dmx(cls, data: Element, version: int) -> PaletteState:
+        """Parse DMX data."""
+        try:
+            uuid = UUID(bytes=data['selected'].val_bytes)
+        except (LookupError, ValueError):
+            uuid = UUID_PORTAL2
+        return PaletteState(
+            uuid,
+            data['save_settings'].val_bool,
+        )
+
+    def export_dmx(self) -> Element:
+        """Export to a DMX."""
+        elem = Element('Palette', 'DMElement')
+        elem['selected'] = self.selected.bytes
+        elem['save_settings'] = self.save_settings
+        return elem
+
+
 class PaletteUI:
     """UI for selecting palettes."""
     def __init__(
@@ -32,7 +96,7 @@ class PaletteUI:
         cmd_clear: Callable[[], None],
         cmd_shuffle: Callable[[], None],
         get_items: Callable[[], list[tuple[str, int]]],
-        set_items: Callable[[Palette], None],
+        set_items: Callable[[Palette], Awaitable[None]],
     ) -> None:
         """Initialises the palette pane.
 
@@ -46,21 +110,17 @@ class PaletteUI:
             pal.uuid: pal
             for pal in paletteLoader.load_palettes()
         }
-
-        try:
-            self.selected_uuid = UUID(hex=BEE2_config.GEN_OPTS.get_val('Last_Selected', 'palette_uuid', ''))
-        except ValueError:
-            self.selected_uuid = UUID_PORTAL2
-
-        f.rowconfigure(1, weight=1)
-        f.columnconfigure(0, weight=1)
-        self.var_save_settings = tk.BooleanVar(value=BEE2_config.GEN_OPTS.get_bool('General', 'palette_save_settings'))
+        prev_state = config.get_cur_conf(PaletteState, default=PaletteState())
+        self.selected_uuid = prev_state.selected
+        self.var_save_settings = tk.BooleanVar(value=prev_state.save_settings)
         self.var_pal_select = tk.StringVar(value=self.selected_uuid.hex)
         self.get_items = get_items
         self.set_items = set_items
         # Overwritten to configure the save state button.
         self.save_btn_state = lambda s: None
 
+        f.rowconfigure(1, weight=1)
+        f.columnconfigure(0, weight=1)
         ttk.Button(
             f,
             text=gettext('Clear Palette'),
@@ -69,7 +129,11 @@ class PaletteUI:
 
         self.ui_treeview = treeview = ttk.Treeview(f, show='tree', selectmode='browse')
         self.ui_treeview.grid(row=1, sticky="NSEW")
-        self.ui_treeview.tag_bind(TREE_TAG_PALETTES, '<ButtonPress>', self.event_select_tree)
+        # We need to delay this a frame, so the selection completes.
+        self.ui_treeview.tag_bind(
+            TREE_TAG_PALETTES, '<ButtonPress>',
+            lambda e: background_run(self.event_select_tree),
+        )
 
         # Avoid re-registering the double-lambda, just do it here.
         # This makes clicking the groups return selection to the palette.
@@ -110,18 +174,19 @@ class PaletteUI:
             command=self.event_remove,
         )
         self.ui_menu_delete_index = menu.index('end')
+        self.ui_menu_indexes = [self.ui_menu_delete_index]
 
         menu.add_command(
             label=gettext('Change Palette Group...'),
             command=self.event_change_group,
         )
-        self.ui_menu_regroup_index = menu.index('end')
+        self.ui_menu_indexes.append(menu.index('end'))
 
         menu.add_command(
             label=gettext('Rename Palette...'),
             command=self.event_rename,
         )
-        self.ui_menu_rename_index = menu.index('end')
+        self.ui_menu_indexes.append(menu.index('end'))
 
         menu.add_command(
             label=gettext('Fill Palette'),
@@ -142,7 +207,7 @@ class PaletteUI:
             command=self.event_save,
             accelerator=tk_tools.ACCEL_SAVE,
         )
-        self.ui_menu_save_ind = menu.index('end')
+        self.ui_menu_indexes.append(menu.index('end'))
         menu.add_command(
             label=gettext('Save Palette As...'),
             command=self.event_save_as,
@@ -211,7 +276,10 @@ class PaletteUI:
                 grp_menu.add_radiobutton(
                     label=pal.name,
                     value=pal.uuid.hex,
-                    command=self.event_select_menu,
+                    # If we remake the palette menus inside this event handler, it tries
+                    # to select the old menu item (likely), so a crash occurs. Delay until
+                    # another frame.
+                    command=lambda: background_run(self.event_select_menu),
                     variable=self.var_pal_select,
                     image=gear_img,
                     compound='left',
@@ -233,7 +301,7 @@ class PaletteUI:
                         image=gear_img,
                         tags=TREE_TAG_PALETTES,
                     )
-        # Finally strip any ones which were removed.
+        # Finally, strip any ones which were removed.
         if existing:
             self.ui_treeview.delete(*existing)
 
@@ -248,21 +316,26 @@ class PaletteUI:
         if self.selected.readonly:
             self.ui_remove.state(('disabled',))
             self.save_btn_state(('disabled',))
-            self.ui_menu.entryconfigure(self.ui_menu_delete_index, state='disabled')
-            self.ui_menu.entryconfigure(self.ui_menu_regroup_index, state='disabled')
-            self.ui_menu.entryconfigure(self.ui_menu_save_ind, state='disabled')
-            self.ui_menu.entryconfigure(self.ui_menu_rename_index, state='disabled')
+            for ind in self.ui_menu_indexes:
+                self.ui_menu.entryconfigure(ind, state='disabled')
         else:
             self.ui_remove.state(('!disabled',))
             self.save_btn_state(('!disabled',))
-            self.ui_menu.entryconfigure(self.ui_menu_delete_index, state='normal')
-            self.ui_menu.entryconfigure(self.ui_menu_regroup_index, state='normal')
-            self.ui_menu.entryconfigure(self.ui_menu_save_ind, state='normal')
-            self.ui_menu.entryconfigure(self.ui_menu_rename_index, state='normal')
+            for ind in self.ui_menu_indexes:
+                self.ui_menu.entryconfigure(ind, state='normal')
 
-    def event_save_settings_changed(self) -> None:
-        """Save the state of this button."""
-        BEE2_config.GEN_OPTS['General']['palette_save_settings'] = srctools.bool_as_int(self.var_save_settings.get())
+    def make_option_checkbox(self, frame: tk.Misc) -> ttk.Checkbutton:
+        """Create a checkbutton configured to control the save palette in settings option."""
+        return ttk.Checkbutton(
+            frame,
+            text=gettext('Save Settings in Palettes'),
+            variable=self.var_save_settings,
+            command=self._store_configuration,
+        )
+
+    def _store_configuration(self) -> None:
+        """Save the state of the palette to the config."""
+        config.store_conf(PaletteState(self.selected_uuid, self.var_save_settings.get()))
 
     def event_remove(self) -> None:
         """Remove the currently selected palette."""
@@ -275,7 +348,7 @@ class PaletteUI:
             pal.delete_from_disk()
             del self.palettes[pal.uuid]
         self.select_palette(paletteLoader.UUID_PORTAL2)
-        self.set_items(self.selected)
+        background_run(self.set_items, self.selected)
 
     def event_save(self) -> None:
         """Save the current palette over the original name."""
@@ -285,7 +358,7 @@ class PaletteUI:
         else:
             self.selected.pos = self.get_items()
             if self.var_save_settings.get():
-                self.selected.settings = BEE2_config.get_curr_settings(is_palette=True)
+                self.selected.settings = config.get_pal_conf()
             else:
                 self.selected.settings = None
             self.selected.save(ignore_readonly=True)
@@ -302,7 +375,7 @@ class PaletteUI:
             pal.uuid = paletteLoader.uuid4()
 
         if self.var_save_settings.get():
-            pal.settings = BEE2_config.get_curr_settings(is_palette=True)
+            pal.settings = config.get_pal_conf()
 
         pal.save()
         self.palettes[pal.uuid] = pal
@@ -321,10 +394,12 @@ class PaletteUI:
         self.update_state()
 
     def select_palette(self, uuid: UUID) -> None:
-        """Select a new palette, and update state. This does not update items/settings!"""
-        pal = self.palettes[uuid]
-        self.selected_uuid = uuid
-        BEE2_config.GEN_OPTS['Last_Selected']['palette_uuid'] = uuid.hex
+        """Select a new palette. This does not update items/settings!"""
+        if uuid in self.palettes:
+            self.selected_uuid = uuid
+            self._store_configuration()
+        else:
+            LOGGER.warning('Unknown UUID {}!', uuid.hex)
 
     def event_change_group(self) -> None:
         """Change the group of a palette."""
@@ -340,23 +415,22 @@ class PaletteUI:
             self.selected.save()
             self.update_state()
 
-    def event_select_menu(self) -> None:
+    async def event_select_menu(self) -> None:
         """Called when the menu buttons are clicked."""
         uuid_hex = self.var_pal_select.get()
         self.select_palette(UUID(hex=uuid_hex))
-        self.set_items(self.selected)
-        # If we remake the palette menus inside this event handler, it tries
-        # to select the old menu item (likely), so a crash occurs. Delay until
-        # another frame.
-        self.ui_treeview.after_idle(self.update_state)
+        await self.set_items(self.selected)
+        self.update_state()
 
-    def event_select_tree(self, evt: tk.Event) -> None:
+    async def event_select_tree(self) -> None:
         """Called when palettes are selected on the treeview."""
-        # We're called just before it actually changes, so look up by the cursor pos.
-        uuid_hex = self.ui_treeview.identify('item', evt.x, evt.y)[4:]
+        try:
+            uuid_hex = self.ui_treeview.selection()[0][4:]
+        except IndexError:  # No selection, exit.
+            return
         self.var_pal_select.set(uuid_hex)
         self.select_palette(UUID(hex=uuid_hex))
-        self.set_items(self.selected)
+        await self.set_items(self.selected)
         self.update_state()
 
     def treeview_reselect(self) -> None:

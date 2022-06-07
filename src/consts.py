@@ -1,6 +1,7 @@
 """Various constant values (Mainly texture names.)"""
 from __future__ import annotations
-from typing import cast, Any, TypeVar, Type, MutableMapping, Iterator
+from typing import Mapping, cast, Any, TypeVar, Type, MutableMapping, Iterator
+from typing_extensions import Final
 from enum import Enum, EnumMeta
 from srctools import Side
 
@@ -51,22 +52,24 @@ class MaterialGroupMeta(EnumMeta):
     _value2member_map_: dict[str, Any]  # Enum defines.
 
     @classmethod
-    def __prepare__(mcs, name: str, bases: tuple[type, ...], **kwargs: Any) -> MutableMapping[str, Any]:
+    def __prepare__(mcs, cls: str, bases: tuple[type, ...], /, **kwargs: Any) -> Mapping[str, Any]:
         """Override Enum class-dict type.
 
         This makes string-values lowercase when set.
         """
-        namespace = super().__prepare__(name, bases, **kwargs)
+        namespace = super().__prepare__(cls, bases, **kwargs)
         return _MaterialGroupNS(cast(MutableMapping[str, Any], namespace))
 
-    def __new__(mcs, cls: type, bases: tuple[type, ...], classdict: _MaterialGroupNS, **kwds: Any) -> EnumMeta:
+    def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any], **kwds: Any) -> MaterialGroupMeta:
         """Unpack the dict type back to the original for EnumMeta.
 
         It accesses attributes, so it can't have our wrapper.
         """
-        return super().__new__(mcs, cls, bases, classdict.mapping, **kwds)
+        assert isinstance(namespace, _MaterialGroupNS)
+        # Is always enum._EnumDict, but that's private.
+        return super().__new__(mcs, name, bases, cast(Any, namespace.mapping), **kwds)
 
-    def __contains__(cls, value) -> bool:
+    def __contains__(cls, value: object) -> bool:
         """MaterialGroup can check if strings are equal to a member."""
         if isinstance(value, str):
             return value.casefold() in cls._value2member_map_
@@ -91,10 +94,21 @@ class MaterialGroup(str, Enum, metaclass=MaterialGroupMeta):
       to any members.
     * str(member) == member.value
     """
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
+        """Compare case-insensitively."""
         if isinstance(other, Side):
             other = other.mat
-        return self.value == other.casefold()
+        if isinstance(other, str):
+            return self.value == other.casefold()
+        return NotImplemented
+
+    def __ne__(self, other: object) -> bool:
+        """Compare case-insensitively."""
+        if isinstance(other, Side):
+            other = other.mat
+        if isinstance(other, str):
+            return self.value != other.casefold()
+        return NotImplemented
 
     def __str__(self) -> str:
         return self.value
@@ -250,12 +264,12 @@ class MusicChannel(Enum):
 
 # Outputs we need to use to make a math_counter act like
 # the specified logic gate.
-COUNTER_AND_ON = 'OnHitMax'
-COUNTER_AND_OFF = 'OnChangedFromMax'
+COUNTER_AND_ON: Final = 'OnHitMax'
+COUNTER_AND_OFF: Final = 'OnChangedFromMax'
 
-COUNTER_OR_ON = 'OnChangedFromMin'
-COUNTER_OR_OFF = 'OnHitMin'
+COUNTER_OR_ON: Final = 'OnChangedFromMin'
+COUNTER_OR_OFF: Final = 'OnHitMin'
 
-SEL_ICON_SIZE = 96  # Size of the selector win icons
-SEL_ICON_SIZE_LRG = (256, 192)  # Size of the larger icon shown in description.
-SEL_ICON_CROP_SHRINK = (32, 0, 256 - 32, 192)  # Bounds required to crop from lrg to small.
+SEL_ICON_SIZE: Final = 96  # Size of the selector win icons
+SEL_ICON_SIZE_LRG: Final = (256, 192)  # Size of the larger icon shown in description.
+SEL_ICON_CROP_SHRINK: Final = (32, 0, 256 - 32, 192)  # Bounds required to crop from lrg to small.

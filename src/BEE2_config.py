@@ -1,93 +1,20 @@
-"""Settings related logic for the application.
-
-Functions can be registered with a name, which will be called to save/load
-settings.
-
-This also contains a version of ConfigParser that can be easily resaved.
+"""Enhancement of ConfigParser for our uses.
 
 It only saves if the values are modified.
 Most functions are also altered to allow defaults instead of erroring.
 """
 from configparser import ConfigParser, NoOptionError, SectionProxy, ParsingError
 from pathlib import Path
-from typing import Any, Mapping, Optional, Callable, Iterator
+from typing import Any, Optional, Iterator, Mapping
 from threading import Lock, Event
-from atomicwrites import atomic_write
 
-from srctools import Property, KeyValError
+from atomicwrites import atomic_write
 
 import utils
 import srctools.logger
 
 
 LOGGER = srctools.logger.get_logger(__name__)
-
-# Functions for saving or loading application settings.
-# The palette attribute indicates if this will be persisted in palettes.
-OPTION_LOAD: utils.FuncLookup[Callable[[Property], None]] = utils.FuncLookup('LoadHandler', attrs=['from_palette'])
-OPTION_SAVE: utils.FuncLookup[Callable[[], Property]] = utils.FuncLookup('SaveHandler', attrs=['to_palette'])
-
-
-def get_curr_settings(*, is_palette: bool) -> Property:
-    """Return a property tree defining the current options."""
-    props = Property.root()
-
-    for opt_id, opt_func in OPTION_SAVE.items():
-        # Skip if it opts out of being on the palette.
-        if is_palette and not getattr(opt_func, 'to_palette', True):
-            continue
-        opt_prop = opt_func()
-        opt_prop.name = opt_id.title()
-        props.append(opt_prop)
-
-    return props
-
-
-def apply_settings(props: Property, *, is_palette: bool) -> None:
-    """Given a property tree, apply it to the widgets."""
-    for opt_prop in props:
-        try:
-            func = OPTION_LOAD[opt_prop.name]
-        except KeyError:
-            LOGGER.warning('No handler for option type "{}"!', opt_prop.real_name)
-            continue
-        # Skip if it opts out of being on the palette.
-        if is_palette and not getattr(func, 'from_palette', True):
-            continue
-        func(opt_prop)
-
-
-def read_settings() -> None:
-    """Read and apply the settings from disk."""
-    path = utils.conf_location('config/config.vdf')
-    try:
-        file = path.open(encoding='utf8')
-    except FileNotFoundError:
-        return
-    try:
-        with file:
-            props = Property.parse(file)
-    except KeyValError:
-        LOGGER.warning('Cannot parse config.vdf!', exc_info=True)
-        # Try and move to a backup name, if not don't worry about it.
-        try:
-            path.replace(path.with_suffix('.err.vdf'))
-        except IOError:
-            pass
-    apply_settings(props, is_palette=False)
-
-
-def write_settings() -> None:
-    """Write the settings to disk."""
-    props = get_curr_settings(is_palette=False)
-    with atomic_write(
-        utils.conf_location('config/config.vdf'),
-        encoding='utf8',
-        overwrite=True,
-    ) as file:
-        for prop in props:
-            for line in prop.export():
-                file.write(line)
 
 
 def get_package_locs() -> Iterator[Path]:

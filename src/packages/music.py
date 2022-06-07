@@ -7,15 +7,14 @@ import srctools.logger
 
 from consts import MusicChannel
 from app import lazy_conf
-from packages import PakObject, ParseData, SelitemData, get_config, ExportData
+from packages import PackagesSet, PakObject, ParseData, SelitemData, get_config, ExportData
 
 
 LOGGER = srctools.logger.get_logger(__name__)
 
 
-class Music(PakObject):
+class Music(PakObject, needs_foreground=True):
     """Allows specifying background music for the map."""
-
     def __init__(
         self,
         music_id,
@@ -49,6 +48,7 @@ class Music(PakObject):
         inst = data.info['instance', None]
         sound = data.info.find_key('soundscript', or_blank=True)
 
+        sounds: dict[MusicChannel, list[str]]
         if sound.has_children():
             sounds = {}
             for channel in MusicChannel:
@@ -96,42 +96,29 @@ class Music(PakObject):
                 for channel in MusicChannel
             }
 
-        snd_length = data.info['loop_len', '0']
-        if ':' in snd_length:
+        snd_length_str = data.info['loop_len', '0']
+        if ':' in snd_length_str:
             # Allow specifying lengths as min:sec.
-            minute, second = snd_length.split(':')
+            minute, second = snd_length_str.split(':')
             snd_length = 60 * srctools.conv_int(minute) + srctools.conv_int(second)
         else:
-            snd_length = srctools.conv_int(snd_length)
-
-        packfiles = [
-            prop.value
-            for prop in
-            data.info.find_all('pack')
-        ]
+            snd_length = srctools.conv_int(snd_length_str)
 
         children_prop = data.info.find_block('children', or_blank=True)
-        children = {
-            channel: children_prop[channel.value, '']
-            for channel in MusicChannel
-            if channel is not MusicChannel.BASE
-        }
 
-        config = get_config(
-            data.info,
-            'music',
-            pak_id=data.pak_id,
-            source=f'Music <{data.id}>',
-        )
         return cls(
             data.id,
             selitem_data,
             sounds,
-            children,
+            children={
+                channel: children_prop[channel.value, '']
+                for channel in MusicChannel
+                if channel is not MusicChannel.BASE
+            },
             inst=inst,
             sample=sample,
-            config=config,
-            pack=packfiles,
+            config=get_config(data.info, 'music', pak_id=data.pak_id, source=f'Music <{data.id}>'),
+            pack=[prop.value for prop in data.info.find_all('pack')],
             loop_len=snd_length,
             synch_tbeam=synch_tbeam,
         )
@@ -142,7 +129,7 @@ class Music(PakObject):
         self.selitem_data += override.selitem_data
 
     def __repr__(self) -> str:
-        return '<Music ' + self.id + '>'
+        return f'<Music {self.id}>'
 
     def provides_channel(self, channel: MusicChannel) -> bool:
         """Check if this music has this channel."""
@@ -251,14 +238,14 @@ class Music(PakObject):
             )
 
     @classmethod
-    def post_parse(cls) -> None:
+    async def post_parse(cls, packset: PackagesSet) -> None:
         """Check children of each music item actually exist.
 
         This must be done after they all were parsed.
         """
         sounds: dict[frozenset[str], str] = {}
 
-        for music in cls.all():
+        for music in packset.all_obj(cls):
             for channel in MusicChannel:
                 # Base isn't present in this.
                 child_id = music.children.get(channel, '')

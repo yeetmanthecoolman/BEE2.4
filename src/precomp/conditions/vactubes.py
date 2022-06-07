@@ -3,14 +3,12 @@
 from __future__ import annotations
 from collections.abc import Iterator, Iterable
 
-import attr
-
+import attrs
 from srctools import Vec, Property, Entity, VMF, Solid, Matrix, Angle
 import srctools.logger
 
-from precomp import tiling, instanceLocs, connections, template_brush
+from precomp import tiling, instanceLocs, conditions, connections, template_brush
 from precomp.brushLoc import POS as BLOCK_POS
-from precomp.conditions import make_result, meta_cond, RES_EXHAUSTED
 import utils
 
 COND_MOD_NAME = None
@@ -25,7 +23,7 @@ PUSH_TRIGS: dict[tuple[float, float, float], Entity] = {}
 VAC_TRACKS: list[tuple[Marker, dict[str, Marker]]] = []  # Tuples of (start, group)
 
 
-@attr.define
+@attrs.define
 class Config:
     """Configuration for a vactube item set."""
     inst_corner: list[str]
@@ -42,21 +40,21 @@ class Config:
     # For straight instances, a size (multiple of 128) -> instance.
     inst_straight: dict[int, str]
     # And those sizes from large to small.
-    inst_straight_sizes: list[int] = attr.ib(init=False)
+    inst_straight_sizes: list[int] = attrs.field(init=False)
     @inst_straight_sizes.default
     def _straight_size(self) -> list[int]:
         return sorted(self.inst_straight.keys(), reverse=True)
 
 
-@attr.define
+@attrs.define
 class Marker:
     """A single node point."""
-    ent: Entity = attr.ib(on_setattr=attr.setters.frozen)
+    ent: Entity = attrs.field(on_setattr=attrs.setters.frozen)
     conf: Config
     size: int
     no_prev: bool = True
     next: str | None = None
-    orient: Matrix = attr.ib(init=False, on_setattr=attr.setters.frozen)
+    orient: Matrix = attrs.field(init=False, on_setattr=attrs.setters.frozen)
 
     # noinspection PyUnresolvedReferences
     @orient.default
@@ -83,7 +81,7 @@ class Marker:
 VAC_CONFIGS: dict[str, dict[str, tuple[Config, int]]] = {}
 
 
-@make_result('CustVactube')
+@conditions.make_result('CustVactube')
 def res_vactubes(vmf: VMF, res: Property):
     """Specialised result to parse vactubes from markers.
 
@@ -163,7 +161,7 @@ def res_vactubes(vmf: VMF, res: Property):
         """Create the vactubes."""
         if group not in VAC_CONFIGS:
             # We've already executed this config group
-            return RES_EXHAUSTED
+            return conditions.RES_EXHAUSTED
 
         del VAC_CONFIGS[group]  # Don't let this run twice
 
@@ -215,11 +213,11 @@ def res_vactubes(vmf: VMF, res: Property):
             if marker.no_prev:
                 VAC_TRACKS.append((marker, markers))
 
-        return RES_EXHAUSTED
+        return conditions.RES_EXHAUSTED
     return result
 
 
-@meta_cond(400)
+@conditions.meta_cond(400)
 def vactube_gen(vmf: VMF) -> None:
     """Generate the vactubes, after most conditions have run."""
     if not VAC_TRACKS:
@@ -233,11 +231,12 @@ def vactube_gen(vmf: VMF) -> None:
         vmf.add_ent(start_logic)
 
         if start_normal.z > 0:
-            start_logic['file'] = start.conf.inst_entry_ceil
+            start_logic['file'] = fname=start.conf.inst_entry_ceil
         elif start_normal.z < 0:
-            start_logic['file'] = start.conf.inst_entry_floor
+            start_logic['file'] = fname = start.conf.inst_entry_floor
         else:
-            start_logic['file'] = start.conf.inst_entry_wall
+            start_logic['file'] = fname = start.conf.inst_entry_wall
+        conditions.ALL_INST.add(fname.casefold())
 
         end = start
 
@@ -263,6 +262,7 @@ def vactube_gen(vmf: VMF) -> None:
             end_logic = end.ent.copy()
             vmf.add_ent(end_logic)
             end_logic['file'] = end.conf.inst_exit
+            conditions.ALL_INST.add(end.conf.inst_exit.casefold())
 
 
 def push_trigger(vmf: VMF, loc: Vec, normal: Vec, solids: list[Solid]) -> None:
@@ -334,8 +334,8 @@ def make_straight(
 
     off = 0
     for seg_dist in utils.fit(dist, config.inst_straight_sizes):
-        vmf.create_ent(
-            classname='func_instance',
+        conditions.add_inst(
+            vmf,
             origin=origin + off * orient.forward(),
             angles=angles,
             file=config.inst_straight[seg_dist],
@@ -359,16 +359,16 @@ def make_straight(
                     continue
                 # Check all 4 center tiles are present.
                 if all(tile[u, v].is_tile for u in (1, 2) for v in (1, 2)):
-                    vmf.create_ent(
-                        classname='func_instance',
+                    conditions.add_inst(
+                        vmf,
                         origin=position,
                         angles=Matrix.from_basis(x=normal, z=supp_dir).to_angle(),
                         file=config.inst_support,
                     )
                     placed_support = True
             if placed_support and config.inst_support_ring:
-                vmf.create_ent(
-                    classname='func_instance',
+                conditions.add_inst(
+                    vmf,
                     origin=position,
                     angles=angles,
                     file=config.inst_support_ring,
@@ -384,9 +384,9 @@ def make_corner(
     config: Config,
 ) -> None:
     """Place a corner."""
-    angles = Matrix.from_basis(z=start_dir, x=end_dir).to_angle()
-    vmf.create_ent(
-        classname='func_instance',
+    angles = Matrix.from_basis(z=start_dir, x=end_dir)
+    conditions.add_inst(
+        vmf,
         origin=origin,
         angles=angles,
         file=config.inst_corner[int(size)],

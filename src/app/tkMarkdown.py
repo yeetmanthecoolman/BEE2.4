@@ -5,13 +5,14 @@ This produces a stream of values, which are fed into richTextBox to display.
 from __future__ import annotations
 from collections.abc import Sequence
 import urllib.parse
+import types
 
+import attrs
 from mistletoe import block_token as btok, span_token as stok
 import mistletoe
-import attr
+import srctools.logger
 
 from app.img import Handle as ImgHandle
-import srctools.logger
 import utils
 
 LOGGER = srctools.logger.get_logger(__name__)
@@ -21,7 +22,7 @@ class Block:
     """The kinds of data contained in MarkdownData."""
 
 
-@attr.frozen
+@attrs.frozen
 class TextSegment(Block):
     """Each section added in text blocks."""
     text: str  # The text to show
@@ -29,7 +30,7 @@ class TextSegment(Block):
     url: str | None  # If set, the text should be given this URL as a callback.
 
 
-@attr.define
+@attrs.define
 class Image(Block):
     """An image."""
     handle: ImgHandle
@@ -42,16 +43,14 @@ _HR = [
 ]
 
 
-@attr.define
+@attrs.define
 class MarkdownData:
     """The output of the conversion, a set of tags and link references for callbacks.
 
     Blocks are a list of data.
     """
     # External users shouldn't modify directly, so make it readonly.
-    blocks: Sequence[Block] = attr.ib(converter=list, factory=[].copy)
-    # richtextbox strips the newlines later on, so we can join with these preserved.
-    _unstripped: bool = True
+    blocks: Sequence[Block] = attrs.field(factory=[].copy)
 
     def __bool__(self) -> bool:
         """Empty data is false."""
@@ -59,7 +58,7 @@ class MarkdownData:
 
     def copy(self) -> 'MarkdownData':
         """Create and return a duplicate of this object."""
-        return MarkdownData(self.blocks)
+        return MarkdownData(list(self.blocks))
 
     @classmethod
     def text(cls, text: str, *tags: str, url: str | None = None) -> MarkdownData:
@@ -79,11 +78,12 @@ class TKRenderer(mistletoe.BaseRenderer):
         self.package: str | None = None
         super().__init__()
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type: type[BaseException], exc_val: BaseException, exc_tb: types.TracebackType) -> None:
         self._list_stack.clear()
         self.package = None
 
     def render(self, token: btok.BlockToken) -> MarkdownData:
+        """Indicate the correct types for this."""
         return super().render(token)
 
     def render_inner(self, token: stok.SpanToken | btok.BlockToken) -> MarkdownData:
